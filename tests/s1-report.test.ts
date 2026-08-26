@@ -53,6 +53,7 @@ function harness(opts: { queue?: Array<{ status: "ok"; snapshot: Snapshot }>; de
 	let cursor = 0;
 	const detail = opts.detail ?? { models: null, tools: null };
 	const install = createExtension({
+		env: { PI_GLM_USAGE_LANG: "en" },
 		keyDepsFor: (provider: string) => makeKeyDeps({ env: provider === CN ? { ZAI_CODING_CN_API_KEY: "k" } : { ZAI_API_KEY: "k" } }),
 		quotaClientFor: () => ({
 			fetchQuota: () => {
@@ -104,6 +105,7 @@ test("command works when the active model is not a GLM provider (key resolves)",
 test("no key anywhere: error notify, no overlay", async () => {
 	const pi = fakePi();
 	const install = createExtension({
+		env: { PI_GLM_USAGE_LANG: "en" },
 		keyDepsFor: () => makeKeyDeps({ env: {} }),
 		quotaClientFor: () => ({ fetchQuota: () => Promise.resolve({ status: "error", message: "unreachable" }), fetchDetail: () => Promise.resolve(null), resetBreaker: () => {} }),
 		nowFn: () => 0,

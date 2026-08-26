@@ -16,7 +16,7 @@ const snapshot = {
 
 test("report: header with plan level, all segments, local reset rendering", () => {
 	const text = buildReportText(snapshot, { models: null, tools: null }, { now: NOW });
-	assert.match(text, /GLM Coding Plan usage .*level: max/);
+	assert.match(text, /GLM Coding Plan — max/);
 	assert.match(text, /5h window\s+34% used/);
 	assert.match(text, /Weekly\s+2% used/);
 	assert.match(text, /MCP\s+1% used/);
