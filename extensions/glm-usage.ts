@@ -93,6 +93,7 @@ const MESSAGES: Record<Lang, Record<string, (v: MsgVars) => string>> = {
 		rateLimited: () => "pi-glm-usage: the usage endpoint is rate-limiting; retry shortly.",
 		jsonModeRestricted: () => "pi-glm-usage: --json requires TUI or print mode.",
 		fetchFailed: () => "pi-glm-usage: usage fetch failed.",
+		reportSummary: (v) => `GLM 5h window: ${v.pct}% used`,
 		noKeyAny: () => "pi-glm-usage: no API key found for any GLM provider.",
 	},
 	zh: {
@@ -113,11 +114,14 @@ const MESSAGES: Record<Lang, Record<string, (v: MsgVars) => string>> = {
 		rateLimited: () => "pi-glm-usage：用量接口限流中，稍后重试。",
 		jsonModeRestricted: () => "pi-glm-usage：--json 仅支持 TUI 或 print 模式。",
 		fetchFailed: () => "pi-glm-usage：用量获取失败。",
+		reportSummary: (v) => `GLM 5小时窗口：已用 ${v.pct}%`,
 		noKeyAny: () => "pi-glm-usage：未找到任何 GLM 供应商的 API key。",
 	},
 };
 
-export function msg(lang: Lang, key: string, vars: MsgVars = {}): string {
+export type MsgKey = keyof typeof MESSAGES.en;
+
+export function msg(lang: Lang, key: MsgKey, vars: MsgVars = {}): string {
 	const fn = MESSAGES[lang][key] ?? MESSAGES.en[key];
 	return fn ? fn(vars) : key;
 }
@@ -200,6 +204,8 @@ export function piAgentDir(env: Record<string, string | undefined>, homedir: str
 // ---------------------------------------------------------------------------
 
 /** Footer labels for known units; unknown units are omitted from the footer. */
+const identityTheme: FooterTheme = { fg: (_role, text) => text };
+
 const FOOTER_LABELS: Record<number, string> = { 3: "5h", 6: "W", 5: "M" };
 const FOOTER_ORDER = [3, 6, 5];
 const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] as const;
@@ -234,6 +240,16 @@ export function formatReset(resetMs: number | undefined, now: number): string {
 	return `${MONTHS[at.getMonth()]}${String(at.getDate()).padStart(2, "0")}`;
 }
 
+/** 8-cell usage bar; filled cells take the threshold color, empty cells dim. */
+export function renderBar(percentage: number | null, theme: FooterTheme): string {
+	const width = 8;
+	const filled = percentage === null ? 0 : Math.round((percentage / 100) * width);
+	return (
+		theme.fg(colorRoleFor(percentage), "█".repeat(filled)) +
+		theme.fg("dim", "░".repeat(width - filled))
+	);
+}
+
 export function renderFooter(snapshot: Snapshot, opts: { now: number; stale?: boolean; theme?: FooterTheme }): string {
 	const displayed = FOOTER_ORDER.filter((u) => snapshot.limits.some((l) => l.unit === u)).slice(0, 2);
 	const parts = displayed.map((unit) => ({ unit, limit: snapshot.limits.find((l) => l.unit === unit)! }));
@@ -243,7 +259,7 @@ export function renderFooter(snapshot: Snapshot, opts: { now: number; stale?: bo
 	const segs = parts.map((p, i) => {
 		const pctText = p.limit.percentage === null ? "?" : String(p.limit.percentage);
 		const staleSuffix = opts.stale && i === 0 ? "~" : "";
-		const chunk = `${FOOTER_LABELS[p.unit]} ${pctText}%${staleSuffix}`;
+		const chunk = `${FOOTER_LABELS[p.unit]} ${renderBar(p.limit.percentage, opts.theme ?? identityTheme)} ${pctText}%${staleSuffix}`;
 		const colored = opts.theme ? opts.theme.fg(colorRoleFor(p.limit.percentage), chunk) : chunk;
 		const reset = nearest && nearest.unit === p.unit ? formatReset(p.limit.nextResetTime, opts.now) : "";
 		return reset ? `${colored}↻${reset}` : colored;
@@ -359,7 +375,7 @@ export function createQuotaClient(provider: ProviderId, deps: QuotaClientDeps) {
 				Authorization: authorization(scheme, key),
 				"Accept-Language": "en-US,en",
 				"Content-Type": "application/json",
-				"User-Agent": "pi-glm-usage/0.1.0",
+				"User-Agent": "pi-glm-usage",
 			},
 			signal: AbortSignal.timeout(timeoutMs),
 		});
@@ -429,7 +445,7 @@ export function createQuotaClient(provider: ProviderId, deps: QuotaClientDeps) {
 		const url = `${cfg.baseUrl}/api/monitor/usage/${kind}?startTime=${encodeURIComponent(win.startTime)}&endTime=${encodeURIComponent(win.endTime)}`;
 		try {
 			const res = await deps.fetchImpl(url, {
-				headers: { Authorization: authorization(state.scheme, key), "Accept-Language": "en-US,en", "User-Agent": "pi-glm-usage/0.1.0" },
+				headers: { Authorization: authorization(state.scheme, key), "Accept-Language": "en-US,en", "User-Agent": "pi-glm-usage" },
 				signal: AbortSignal.timeout(timeoutMs),
 			});
 			if (!res.ok) return null;
@@ -642,6 +658,10 @@ export function createExtension(deps: ExtensionDeps) {
 		let snapshot: Snapshot | null = null;
 		let stale = false;
 		let lastFetchAt = Number.NEGATIVE_INFINITY;
+		/** Earliest allowed next fetch: max(lastFetchAt + throttle, retryAfter deadline). */
+		let nextAllowedAt = 0;
+		/** Absolute retry-after deadline; a forced refresh may never shorten it. */
+		let retryDeadline = 0;
 		let inFlight = false;
 		let timer: ReturnType<typeof setIntervalImpl> | null = null;
 		let timerRunning = false;
@@ -689,9 +709,11 @@ export function createExtension(deps: ExtensionDeps) {
 		function refresh(ctx: { ui: UiLike; mode?: string; hasUI?: boolean }, force = false): void {
 			lastUi = ctx.ui;
 			if (!isInteractive(ctx) || active === null || apiKey === null || inFlight) return;
-			if (!force && now() - lastFetchAt < throttleMs()) return;
+			if (now() < retryDeadline) return;
+			if (!force && now() < nextAllowedAt) return;
 			inFlight = true;
 			lastFetchAt = now();
+			nextAllowedAt = Math.max(nextAllowedAt, lastFetchAt + throttleMs());
 			const gen = generation;
 			const ui = ctx.ui;
 			deps.quotaClientFor(active)
@@ -699,18 +721,25 @@ export function createExtension(deps: ExtensionDeps) {
 				.then((res) => {
 					if (gen !== generation) return;
 					if (res.status === "ok") {
+						retryDeadline = 0;
 						snapshot = res.snapshot;
 						stale = false;
+						// Re-arm the throttle against the fresh snapshot: the pre-fetch
+						// cadence was chosen from stale data (85% usage tightens to 60s
+						// only once known). Tighten (earlier deadline) — never extend
+						// past what a retry-after has already mandated.
+						nextAllowedAt = Math.max(retryDeadline, Math.min(nextAllowedAt, Math.max(now(), lastFetchAt + throttleMs())));
 						const alerts = evaluateAlerts(alertState, active as ProviderId, res.snapshot);
 						alertState = alerts.state;
 						alertStore.save(alertState);
 						for (const e of alerts.emitted) {
-							const label = FOOTER_LABELS[e.unit] ?? `unit ${e.unit}`;
+							const label = FOOTER_LABELS[e.unit] ?? msg(lang, "segNameUnknown", { unit: e.unit });
 							const pct = res.snapshot.limits.find((l) => l.unit === e.unit)?.percentage ?? "?";
 							ui.notify(msg(lang, "alertCrossed", { label, pct: String(pct), tier: String(e.tier) }), e.tier === 95 ? "error" : "warning");
 						}
 					} else if (res.status === "retry") {
-						lastFetchAt = now() + res.retryAfterMs;
+						retryDeadline = Math.max(retryDeadline, now() + res.retryAfterMs);
+						nextAllowedAt = Math.max(nextAllowedAt, retryDeadline);
 					} else if (snapshot !== null) {
 						stale = true;
 					}
@@ -825,7 +854,7 @@ export function createExtension(deps: ExtensionDeps) {
 					ctx.ui.notify(
 						res.status === "retry"
 							? msg(lang, "rateLimited")
-							: (res as { message?: string }).message ?? "pi-glm-usage: usage fetch failed.",
+							: (res as { message?: string }).message ?? msg(lang, "fetchFailed"),
 						"error",
 					);
 					return;
@@ -862,7 +891,7 @@ export function createExtension(deps: ExtensionDeps) {
 					await showOverlay(text, ctx);
 				} else {
 					const pct = res.snapshot.limits.find((l) => l.unit === 3)?.percentage;
-					ctx.ui.notify(`GLM 5h window: ${pct === null || pct === undefined ? "unknown" : `${pct}%`} used`, "info");
+					ctx.ui.notify(msg(lang, "reportSummary", { pct: pct === null || pct === undefined ? "?" : String(pct) }), "info");
 				}
 			},
 		});
@@ -890,7 +919,13 @@ export function createExtension(deps: ExtensionDeps) {
 				for (let i = entries.length - 1; i >= 0; i -= 1) {
 					const e = entries[i] as { type?: string; customType?: string; data?: unknown };
 					if (e.type === "custom" && e.customType === ALERT_ENTRY_TYPE && e.data && typeof e.data === "object") {
-						alertState = e.data as AlertState;
+						// Unanchored dedup state is session-scope only (no window
+						// identity to persist); drop it on restore.
+						const persisted = e.data as AlertState;
+						for (const k of Object.keys(persisted)) {
+							if (persisted[k]?.anchor === null) delete persisted[k];
+						}
+						alertState = persisted;
 						break;
 					}
 				}

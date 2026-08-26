@@ -128,7 +128,7 @@ test("plain startup with a GLM default model activates via session_start (no mod
 	await h.pi.emit("session_start", { reason: "new" }, ctx);
 	await settle();
 	assert.equal(h.calls.length, 1, "seeded fetch on startup");
-	assert.match(log.status.at(-1)?.text ?? "", /GLM 5h 34%/);
+	assert.match(log.status.at(-1)?.text ?? "", /GLM 5h ███░░░░░ 34%/);
 });
 
 test("plain startup with a non-GLM default model stays inactive", async () => {
@@ -150,7 +150,7 @@ test("activation fetches once and renders quota into the footer", async () => {
 	assert.equal(h.calls.length, 1);
 	const last = log.status.at(-1);
 	assert.equal(last?.key, STATUS_KEY);
-	assert.match(last?.text ?? "", /GLM 5h 34%/);
+	assert.match(last?.text ?? "", /GLM 5h ███░░░░░ 34%/);
 });
 
 test("throttle: burst of turn_end does not refetch before 180s", async () => {
@@ -206,7 +206,7 @@ test("failed refresh keeps the last snapshot with a stale marker", async () => {
 	const h = harness({ queue: [{ status: "ok", snapshot: snapOf(30) }, { status: "error", message: "boom" }] });
 	const first = await h.select(CN);
 	await settle();
-	assert.match(first.log.status.at(-1)?.text ?? "", /5h 30%/);
+	assert.match(first.log.status.at(-1)?.text ?? "", /5h ██░░░░░░ 30%/);
 	assert.doesNotMatch(first.log.status.at(-1)?.text ?? "", /~/);
 	h.tick(181_000);
 	const after = await h.turnEnd();
@@ -235,4 +235,44 @@ test("agent_start starts an unref'd countdown timer; agent_end and session_shutd
 	await h.agentEnd();
 	await h.shutdown();
 	assert.ok(h.clears.length >= 1, "interval cleared");
+});
+
+test("retry-after is absolute: model_select force cannot shorten it", async () => {
+	const pi = fakePi();
+	let now = Date.UTC(2026, 7, 27, 4, 0, 0);
+	const calls: number[] = [];
+	const queue: Array<{ status: "ok"; snapshot: Snapshot } | { status: "retry"; retryAfterMs: number }> = [
+		{ status: "retry", retryAfterMs: 300_000 },
+	];
+	let cursor = 0;
+	const install = createExtension({
+		env: { PI_GLM_USAGE_LANG: "en" },
+		keyDepsFor: () => makeKeyDeps({ env: { ZAI_CODING_CN_API_KEY: "k" } }),
+		quotaClientFor: () => ({
+			fetchQuota: () => {
+				calls.push(now);
+				const next = queue[Math.min(cursor, queue.length - 1)];
+				cursor += 1;
+				return Promise.resolve(next);
+			},
+			fetchDetail: () => Promise.resolve(null),
+			resetBreaker: () => {},
+		}),
+		nowFn: () => now,
+		interactive: true,
+	});
+	install(pi as never);
+	const mk = () => ({ mode: "tui" as const, ui: { setStatus: () => {}, notify: () => {}, theme: identityTheme } });
+	await pi.emit("model_select", { model: { provider: CN, id: "glm-4.7" }, previousModel: undefined, source: "set" }, mk());
+	await settle();
+	assert.equal(calls.length, 1);
+	// Re-select (force path) while the retry window is live — must not fetch.
+	await pi.emit("model_select", { model: { provider: CN, id: "glm-4.7" }, previousModel: undefined, source: "set" }, mk());
+	await settle();
+	assert.equal(calls.length, 1, "forced refresh honors the retry deadline");
+	// Well after the deadline, a normal refresh goes through.
+	now += 301_000;
+	await pi.emit("turn_end", { turnIndex: 0, message: {}, toolResults: [] }, mk());
+	await settle();
+	assert.equal(calls.length, 2);
 });
