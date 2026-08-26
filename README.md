@@ -46,6 +46,7 @@ GLM 5h ███░░░░░ 34% ↻2h 40m · W ░░░░░░░░ 2%
 | `5h` / `W` / `M` | 5-hour rolling token window / weekly quota / MCP monthly quota; at most two segments are shown (5h first, then W or M) |
 | `34%` | used percentage of that window (integer, 0–100) |
 | `↻2h 40m` | time until the nearest displayed segment resets, recomputed locally every 30 s without network requests; weekday+time within 7 days (`↻Sat 05:00`), date beyond (`↻Sep06`) |
+| `≈2.0h` | estimated time to quota exhaustion at the current burn rate (from persisted snapshots; only shown when exhaustion would beat the reset countdown) |
 | `~` | the displayed value is stale: the last refresh failed, the previous number is kept |
 | color | green < 50%, yellow 50–79%, red ≥ 80% |
 
@@ -81,6 +82,17 @@ Tool usage (last 24h):
 
 `/glm-usage --json` prints the raw merged payload (quota snapshot, query
 window, detail arrays) instead of the overlay — TUI and print mode only.
+
+### Burn rate and exhaustion estimate
+
+Every successful fetch appends a usage snapshot to
+`~/.pi/agent/pi-glm-usage-quota-snapshots.jsonl`. A burn rate
+(percentage points per hour) is estimated from the last three-plus
+snapshots within one window; the footer appends `≈2.0h` when, at that
+rate, the quota would exhaust before the window resets — the `↻`
+countdown already covers the other case. The file is compacted to the
+newest 500 entries once it reaches 1000 lines, so it never grows
+unboundedly.
 
 ### Refresh behavior
 

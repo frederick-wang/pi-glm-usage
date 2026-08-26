@@ -131,6 +131,80 @@ export const STATUS_KEY = "pi-glm-usage";
 
 const HOUR_MS = 3_600_000;
 
+/**
+ * Snapshot store: append-only JSONL with periodic compaction. The file never
+ * grows unboundedly — once it exceeds COMPACT_AT lines it is rewritten
+ * (atomically: temp file + rename) to the newest KEEP lines. The rate window
+ * needs at most a few dozen entries; 500 is generous headroom.
+ */
+export interface QuotaSnapshotStore {
+	append(provider: string, unit: number, snap: QuotaSnapshot): void;
+	load(provider: string, unit: number): QuotaSnapshot[];
+}
+
+const SNAPSHOT_KEEP = 500;
+const SNAPSHOT_COMPACT_AT = 1000;
+
+export function createQuotaSnapshotStore(
+	dir: string,
+	readFile: (p: string) => string | null,
+	appendFile: (p: string, s: string) => void,
+	writeFile: (p: string, s: string) => void,
+	rename: (from: string, to: string) => void,
+): QuotaSnapshotStore {
+	const file = nodePath.join(dir, "pi-glm-usage-quota-snapshots.jsonl");
+	const parseAll = (): Array<{ p: string; u: number; t: number; percentage: number }> => {
+		let raw: string | null;
+		try {
+			raw = readFile(file);
+		} catch {
+			raw = null;
+		}
+		if (raw === null) return [];
+		const out: Array<{ p: string; u: number; t: number; percentage: number }> = [];
+		for (const line of raw.split("\n")) {
+			const t = line.trim();
+			if (!t) continue;
+			try {
+				const r = JSON.parse(t) as { p?: string; u?: number; t?: number; percentage?: number };
+				if (
+					typeof r.p === "string" && typeof r.u === "number" &&
+					typeof r.t === "number" && typeof r.percentage === "number"
+				) {
+					out.push({ p: r.p, u: r.u, t: r.t, percentage: r.percentage });
+				}
+			} catch {
+				// corrupt line: skip
+			}
+		}
+		return out;
+	};
+	return {
+		append(provider, unit, snap) {
+			try {
+				const all = parseAll();
+				all.push({ p: provider, u: unit, t: snap.t, percentage: snap.percentage });
+				if (all.length > SNAPSHOT_COMPACT_AT) {
+					const kept = all.slice(-SNAPSHOT_KEEP);
+					const tmp = `${file}.tmp`;
+					writeFile(tmp, kept.map((r) => JSON.stringify(r)).join("\n") + "\n");
+					rename(tmp, file);
+				} else {
+					appendFile(file, JSON.stringify({ p: provider, u: unit, t: snap.t, percentage: snap.percentage }) + "\n");
+				}
+			} catch {
+				// best-effort
+			}
+		},
+		load(provider, unit) {
+			return parseAll()
+				.filter((r) => r.p === provider && r.u === unit)
+				.map((r) => ({ t: r.t, percentage: r.percentage }))
+				.slice(-SNAPSHOT_KEEP);
+		},
+	};
+}
+
 // ---------------------------------------------------------------------------
 // Key resolution — pure, injectable. Mirrors pi's own precedence:
 // auth.json (under PI_CODING_AGENT_DIR) first, env fallback when the file has
@@ -250,7 +324,10 @@ export function renderBar(percentage: number | null, theme: FooterTheme): string
 	);
 }
 
-export function renderFooter(snapshot: Snapshot, opts: { now: number; stale?: boolean; theme?: FooterTheme }): string {
+export function renderFooter(
+	snapshot: Snapshot,
+	opts: { now: number; stale?: boolean; theme?: FooterTheme; snaps5h?: QuotaSnapshot[] },
+): string {
 	const displayed = FOOTER_ORDER.filter((u) => snapshot.limits.some((l) => l.unit === u)).slice(0, 2);
 	const parts = displayed.map((unit) => ({ unit, limit: snapshot.limits.find((l) => l.unit === unit)! }));
 	const nearest = parts
@@ -264,7 +341,26 @@ export function renderFooter(snapshot: Snapshot, opts: { now: number; stale?: bo
 		const reset = nearest && nearest.unit === p.unit ? formatReset(p.limit.nextResetTime, opts.now) : "";
 		return reset ? `${colored} ↻${reset}` : colored;
 	});
-	return `GLM ${segs.join(" · ")}`;
+	const footer = segs.join(" · ");
+	// Quota-exhaustion estimate for the 5h window: only when the rate says
+	// exhaustion beats the reset (otherwise the ↻ countdown already tells the
+	// truth and a second suffix would be noise).
+	const theme = opts.theme;
+	const limit5h = snapshot.limits.find((l) => l.unit === 3);
+	if (limit5h && opts.snaps5h && opts.snaps5h.length > 0) {
+		const rate = estimateQuotaRate(opts.snaps5h);
+		if (rate !== null && limit5h.percentage !== null) {
+			const runway = quotaRunwayHours(limit5h.percentage, rate);
+			if (runway !== null) {
+				const hours = minExhaustionHours(runway, opts.now, limit5h.nextResetTime);
+				if (hours < (limit5h.nextResetTime ? (limit5h.nextResetTime - opts.now) / HOUR_MS : Infinity)) {
+					const suffix = `≈${hours >= 24 ? `${(hours / 24).toFixed(1)}d` : hours >= 1 ? `${hours.toFixed(1)}h` : `${Math.round(hours * 60)}min`}`;
+					return `GLM ${footer} ${theme ? theme.fg("dim", suffix) : suffix}`;
+				}
+			}
+		}
+	}
+	return `GLM ${footer}`;
 }
 
 const shanghaiFormatter = new Intl.DateTimeFormat("en-CA", {
@@ -472,6 +568,47 @@ function parseRetryAfter(value: string | null): number {
 }
 
 // ---------------------------------------------------------------------------
+// Quota burn rate — S3 pure helpers over persisted usage snapshots.
+// Rate = percentage points per hour within one window (a >=20pt drop marks a
+// window reset and restarts the estimation window); runway = remaining points
+// / rate, capped at the reset moment.
+// ---------------------------------------------------------------------------
+
+export interface QuotaSnapshot {
+	t: number;
+	percentage: number;
+}
+
+export function estimateQuotaRate(snaps: QuotaSnapshot[]): number | null {
+	const usable = snaps.filter((x) => Number.isFinite(x.t) && Number.isFinite(x.percentage));
+	if (usable.length < 3) return null;
+	// Longest tail after the last >=20pt drop (window reset).
+	let start = usable.length - 1;
+	while (start > 0 && usable[start - 1].percentage <= usable[start].percentage + 1e-9) start -= 1;
+	const window = usable.slice(Math.max(start, 0));
+	if (window.length < 3) return null;
+	const span = window[window.length - 1].t - window[0].t;
+	if (span < 3_600_000) return null;
+	const climb = window[window.length - 1].percentage - window[0].percentage;
+	if (climb <= 0) return null;
+	return (climb / span) * 3_600_000;
+}
+
+export function quotaRunwayHours(percentage: number, perHour: number): number | null {
+	if (perHour <= 0) return null;
+	const remaining = 100 - percentage;
+	if (remaining <= 0) return null;
+	return remaining / perHour;
+}
+
+/** Whichever comes first: quota exhaustion at the current rate, or the window reset. */
+export function minExhaustionHours(runwayH: number, now: number, resetAt: number | undefined): number {
+	if (resetAt === undefined || !Number.isFinite(resetAt)) return runwayH;
+	const untilReset = (resetAt - now) / 3_600_000;
+	return Math.min(runwayH, Math.max(untilReset, 0));
+}
+
+// ---------------------------------------------------------------------------
 // Threshold alerts — S3 pure evaluator + S1 wiring.
 // Dedup key: (provider, unit). Window identity: nextResetTime within
 // ±15min (live-verified stable within a window). A drop of ≥20 points
@@ -628,6 +765,7 @@ export interface ExtensionDeps {
 	setInterval?: typeof setInterval;
 	clearInterval?: typeof clearInterval;
 	alertStore?: AlertStore;
+	quotaStore?: QuotaSnapshotStore;
 }
 
 const ALERT_ENTRY_TYPE = "pi-glm-usage-alerts";
@@ -669,6 +807,17 @@ export function createExtension(deps: ExtensionDeps) {
 		let lastUi: UiLike | null = null;
 		let alertState: AlertState | null = null;
 		const lang = resolveLang(deps.env ?? {});
+		const quotaStore: QuotaSnapshotStore | undefined = deps.quotaStore;
+		const snaps5hCache = new Map<ProviderId, QuotaSnapshot[]>();
+		const snaps5hFor = (provider: ProviderId): QuotaSnapshot[] => {
+			if (!quotaStore) return [];
+			let v = snaps5hCache.get(provider);
+			if (!v) {
+				v = quotaStore.load(provider, 3);
+				snaps5hCache.set(provider, v);
+			}
+			return v;
+		};
 		const alertStore: AlertStore =
 			deps.alertStore ?? {
 				save: (s) => {
@@ -703,7 +852,10 @@ export function createExtension(deps: ExtensionDeps) {
 				ui.setStatus(STATUS_KEY, ui.theme.fg("dim", "GLM …"));
 				return;
 			}
-			ui.setStatus(STATUS_KEY, renderFooter(snapshot, { now: now(), stale, theme: ui.theme }));
+			ui.setStatus(
+				STATUS_KEY,
+				renderFooter(snapshot, { now: now(), stale, theme: ui.theme, snaps5h: active !== null ? snaps5hFor(active) : [] }),
+			);
 		}
 
 		function refresh(ctx: { ui: UiLike; mode?: string; hasUI?: boolean }, force = false): void {
@@ -724,6 +876,15 @@ export function createExtension(deps: ExtensionDeps) {
 						retryDeadline = 0;
 						snapshot = res.snapshot;
 						stale = false;
+						if (quotaStore && active !== null) {
+							const l5 = res.snapshot.limits.find((l) => l.unit === 3);
+							if (l5 && l5.percentage !== null) {
+								const snap5 = { t: now(), percentage: l5.percentage };
+								quotaStore.append(active, 3, snap5);
+								const cur = snaps5hCache.get(active) ?? [];
+								snaps5hCache.set(active, [...cur, snap5].slice(-500));
+							}
+						}
 						// Re-arm the throttle against the fresh snapshot: the pre-fetch
 						// cadence was chosen from stale data (85% usage tightens to 60s
 						// only once known). Tighten (earlier deadline) — never extend
@@ -993,5 +1154,36 @@ export default function glmUsage(pi: ExtensionAPI): void {
 		}
 		return c;
 	};
-	createExtension({ env: process.env as Record<string, string | undefined>, keyDepsFor, quotaClientFor })(pi);
+	const quotaStore = createQuotaSnapshotStore(
+		process.env["PI_CODING_AGENT_DIR"] ?? nodePath.join(homedir, ".pi", "agent"),
+		(p) => {
+			try {
+				return nodeFs.readFileSync(p, "utf8");
+			} catch {
+				return null;
+			}
+		},
+		(p, s2) => {
+			try {
+				nodeFs.appendFileSync(p, s2);
+			} catch {
+				// best-effort
+			}
+		},
+		(p, s2) => {
+			try {
+				nodeFs.writeFileSync(p, s2);
+			} catch {
+				// best-effort
+			}
+		},
+		(from, to) => {
+			try {
+				nodeFs.renameSync(from, to);
+			} catch {
+				// best-effort
+			}
+		},
+	);
+	createExtension({ env: process.env as Record<string, string | undefined>, keyDepsFor, quotaClientFor, quotaStore })(pi);
 }
