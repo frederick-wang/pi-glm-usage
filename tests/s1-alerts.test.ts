@@ -64,7 +64,7 @@ function harness(opts: { queue?: Array<{ status: "ok"; snapshot: Snapshot }>; sa
 			resetBreaker: () => {},
 		}),
 		nowFn: () => now,
-		tty: true,
+		interactive: true,
 		alertStore: {
 			save: (s) => saved.push(s),
 			load: () => restored,

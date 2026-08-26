@@ -8,6 +8,26 @@ const identityTheme = { fg: (_r: string, t: string) => t };
 const HOUR = 3_600_000;
 const settle = () => new Promise((r) => setTimeout(r, 15));
 
+// session_start payload varies; the extension reads event.model ?? ctx.model.
+// This helper supplies ctx.model (the documented shape at startup).
+function freshCtxFrom(_h: unknown) {
+	const log: { status: Array<{ key: string; text: string | undefined }>; notifications: Array<{ message: string; level: string }> } = { status: [], notifications: [] };
+	const ctx = {
+		mode: "tui",
+		model: { provider: "zai-coding-cn", id: "glm-4.7" },
+		ui: {
+			setStatus: (key: string, text?: string) => {
+				log.status.push({ key, text });
+			},
+			notify: (message: string, level: string) => {
+				log.notifications.push({ message, level });
+			},
+			theme: identityTheme,
+		},
+	};
+	return { ctx, log };
+}
+
 const snapOf = (pct3: number): Snapshot => ({
 	level: "max",
 	limits: [{ unit: 3, type: "TOKENS_LIMIT", percentage: pct3, nextResetTime: Date.now() + 2 * HOUR }],
@@ -23,6 +43,7 @@ interface Log {
 const freshCtx = () => {
 	const log: Log = { status: [], notifications: [] };
 	const ctx = {
+		mode: "tui",
 		ui: {
 			setStatus: (key: string, text: string) => {
 				log.status.push({ key, text });
@@ -75,7 +96,7 @@ function harness(opts: { queue?: QueueItem[]; tty?: boolean } = {}) {
 		keyDepsFor: () => makeKeyDeps({ env: { ZAI_CODING_CN_API_KEY: "k" } }),
 		quotaClientFor,
 		nowFn: () => now,
-		tty: opts.tty ?? true,
+		interactive: opts.tty ?? true,
 		setInterval: intervalSpy,
 		clearInterval: ((handle: unknown) => {
 			clears.push(handle);
@@ -99,6 +120,27 @@ function harness(opts: { queue?: QueueItem[]; tty?: boolean } = {}) {
 	const shutdown = async () => pi.emit("session_shutdown", { reason: "quit", targetSessionFile: undefined }, freshCtx().ctx);
 	return { pi, select, turnEnd, agentStart, agentEnd, shutdown, calls, timers, clears, tick: (ms: number) => { now += ms; } };
 }
+
+test("plain startup with a GLM default model activates via session_start (no model_select)", async () => {
+	const h = harness();
+	const { ctx, log } = freshCtxFrom(h);
+	await h.pi.emit("session_start", { reason: "new" }, ctx);
+	await settle();
+	assert.equal(h.calls.length, 1, "seeded fetch on startup");
+	assert.match(log.status.at(-1)?.text ?? "", /GLM 5h 34%/);
+});
+
+test("plain startup with a non-GLM default model stays inactive", async () => {
+	const h = harness();
+	const { ctx, log } = freshCtxFrom(h);
+	await h.pi.emit(
+		"session_start",
+		{ reason: "new", model: { provider: "anthropic", id: "sonnet" } },
+		ctx,
+	);
+	await settle();
+	assert.equal(h.calls.length, 0);
+});
 
 test("activation fetches once and renders quota into the footer", async () => {
 	const h = harness();
@@ -144,14 +186,14 @@ test("late response after provider switch is discarded (generation guard)", asyn
 			resetBreaker: () => {},
 		}),
 		nowFn: () => Date.UTC(2026, 7, 27, 4, 0, 0),
-		tty: true,
+		interactive: true,
 	});
 	install(pi as never);
 	const on = freshCtx();
 	await pi.emit("model_select", { model: { provider: CN, id: "glm-4.7" }, previousModel: undefined, source: "set" }, on.ctx);
 	const off = freshCtx();
 	await pi.emit("model_select", { model: { provider: "anthropic", id: "sonnet" }, previousModel: undefined, source: "set" }, off.ctx);
-	assert.equal(off.log.status.at(-1)?.text, "", "cleared on switch");
+	assert.equal(off.log.status.at(-1)?.text, undefined, "cleared on switch");
 	(releaseFetch as ((v: QueueItem) => void) | null)?.({ status: "ok", snapshot: snapOf(34) });
 	await settle();
 	assert.equal(on.log.status.filter((e) => /5h 34%/.test(e.text)).length, 0, "late response never renders");

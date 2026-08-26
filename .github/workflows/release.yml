@@ -24,7 +24,12 @@ jobs:
       - run: pnpm test
       - name: Verify tarball file list (gate)
         run: node scripts/check-pack.mjs
+      - name: Configure npm auth
+        run: |
+          echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" >> "$HOME/.npmrc"
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
       - name: Publish with provenance
-        run: pnpm publish --provenance --access public --no-git-checks
+        run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

@@ -14,7 +14,6 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Container, Text, matchesKey } from "@earendil-works/pi-tui";
 import * as nodeFs from "node:fs";
 import * as nodeOs from "node:os";
 import * as nodePath from "node:path";
@@ -517,7 +516,7 @@ export interface QuotaClientLike {
 }
 
 export interface UiLike {
-	setStatus(key: string, text: string): void;
+	setStatus(key: string, text?: string): void;
 	notify(message: string, level?: string): void;
 	theme: FooterTheme;
 }
@@ -531,7 +530,8 @@ export interface ExtensionDeps {
 	keyDepsFor(provider: ProviderId): KeyDeps;
 	quotaClientFor(provider: ProviderId): QuotaClientLike;
 	nowFn?(): number;
-	tty?: boolean;
+	/** Test override for the interactive-mode check. */
+	interactive?: boolean;
 	setInterval?: typeof setInterval;
 	clearInterval?: typeof clearInterval;
 	alertStore?: AlertStore;
@@ -547,7 +547,11 @@ export function createExtension(deps: ExtensionDeps) {
 	const now = () => (deps.nowFn ?? Date.now)();
 	const setIntervalImpl = deps.setInterval ?? setInterval;
 	const clearIntervalImpl = deps.clearInterval ?? clearInterval;
-	const tty = deps.tty ?? (typeof process !== "undefined" && process.stdout?.isTTY === true);
+	// Interactive-mode gate. Evaluated per event from host-provided ctx
+	// (mode/hasUI), not stdout.isTTY: `pi -p` attached to a terminal still
+	// has a TTY but must not poll or start timers.
+	const isInteractive = (ctx: { mode?: string; hasUI?: boolean }) =>
+		deps.interactive ?? (ctx.mode === "tui" || ctx.hasUI === true);
 	return function install(pi: ExtensionAPI): void {
 		// Generation counter: bumped on every model switch and shutdown so
 		// late async work from a previous provider/state is discarded.
@@ -594,7 +598,7 @@ export function createExtension(deps: ExtensionDeps) {
 
 		function render(ui: UiLike): void {
 			if (active === null) {
-				ui.setStatus(STATUS_KEY, "");
+				ui.setStatus(STATUS_KEY, undefined);
 				return;
 			}
 			if (snapshot === null) {
@@ -604,9 +608,9 @@ export function createExtension(deps: ExtensionDeps) {
 			ui.setStatus(STATUS_KEY, renderFooter(snapshot, { now: now(), stale, theme: ui.theme }));
 		}
 
-		function refresh(ctx: { ui: UiLike }, force = false): void {
+		function refresh(ctx: { ui: UiLike; mode?: string; hasUI?: boolean }, force = false): void {
 			lastUi = ctx.ui;
-			if (!tty || active === null || apiKey === null || inFlight) return;
+			if (!isInteractive(ctx) || active === null || apiKey === null || inFlight) return;
 			if (!force && now() - lastFetchAt < throttleMs()) return;
 			inFlight = true;
 			lastFetchAt = now();
@@ -654,7 +658,7 @@ export function createExtension(deps: ExtensionDeps) {
 				snapshot = null;
 				stale = false;
 				clearTimer();
-				ctx.ui.setStatus(STATUS_KEY, "");
+				ctx.ui.setStatus(STATUS_KEY, undefined);
 				return;
 			}
 			const cfg = PROVIDERS[provider];
@@ -710,15 +714,15 @@ export function createExtension(deps: ExtensionDeps) {
 		async function showOverlay(text: string, ctx: { ui: UiLike & { custom(factory: unknown, opts?: unknown): Promise<unknown> } }): Promise<void> {
 			await ctx.ui.custom(
 				(_tui: unknown, theme: FooterTheme, _kb: unknown, done: (value: unknown) => void) => {
-					const container = new Container();
-					container.addChild(new Text(theme.fg("accent", "GLM Usage Report"), 1, 0));
-					container.addChild(new Text(text, 1, 1));
-					container.addChild(new Text(theme.fg("dim", "Press Enter or Esc to close"), 1, 0));
+					// Zero-dependency overlay: plain text lines joined per render.
+					// Enter (\r / \n) and Esc (\x1b) close; factory args provide
+					// the theme, so no runtime import from pi-tui is needed.
+					const lines = [`  ${theme.fg("accent", "GLM Usage Report")}`, "", ...text.split("\n"), "", `  ${theme.fg("dim", "Press Enter or Esc to close")}`];
 					return {
-						render: (width: number) => container.render(width),
-						invalidate: () => container.invalidate(),
+						render: (width: number) => lines.map((l) => l.slice(0, Math.max(0, width))).join("\n"),
+						invalidate: () => {},
 						handleInput: (data: string) => {
-							if (matchesKey(data, "enter") || matchesKey(data, "escape")) done(undefined);
+							if (data === "\r" || data === "\n" || data === "\x1b") done(undefined);
 						},
 					};
 				},
@@ -776,8 +780,11 @@ export function createExtension(deps: ExtensionDeps) {
 					);
 					if (ctx.mode === "tui") {
 						await showOverlay(payload, ctx);
-					} else {
+					} else if (ctx.mode === "print") {
+						// Only print mode owns stdout; RPC stdout is the protocol.
 						console.log(payload);
+					} else {
+						ctx.ui.notify("pi-glm-usage: --json requires TUI or print mode.", "warning");
 					}
 					return;
 				}
@@ -791,7 +798,23 @@ export function createExtension(deps: ExtensionDeps) {
 			},
 		});
 
-		pi.on("session_start", async (_event, ctx) => {
+		pi.on("session_start", async (event, ctx) => {
+			// Seed activation from the session's model: model_select only fires
+			// on /model, cycling, or restore — a plain startup with a GLM
+			// default model would otherwise never activate the footer.
+			const startupModel =
+				(event as { model?: { provider?: string } }).model ?? (ctx as { model?: { provider?: string } }).model;
+			const startupProvider: string | undefined = startupModel?.provider;
+			if (startupProvider !== undefined && isGlmProvider(startupProvider)) {
+				const provider: ProviderId = startupProvider;
+				const res = resolveKey(provider, deps.keyDepsFor(provider));
+				if (res.status === "ok" || res.status === "conflict") {
+					active = provider;
+					apiKey = res.key;
+					deps.quotaClientFor(provider).resetBreaker();
+					render(ctx.ui);
+				}
+			}
 			// Restore alert dedup state from the session log (last entry wins).
 			try {
 				const entries = (ctx as { sessionManager?: { getEntries?: () => unknown[] } }).sessionManager?.getEntries?.() ?? [];
@@ -816,7 +839,7 @@ export function createExtension(deps: ExtensionDeps) {
 
 		pi.on("agent_start", async (_event, ctx) => {
 			lastUi = ctx.ui;
-			if (!tty || active === null || timerRunning) return;
+			if (!isInteractive(ctx) || active === null || timerRunning) return;
 			timerRunning = true;
 			timer = setIntervalImpl(() => {
 				// Countdown re-render from the cached snapshot; no network.

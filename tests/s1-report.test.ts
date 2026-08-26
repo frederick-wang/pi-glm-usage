@@ -20,7 +20,7 @@ interface Log {
 	customCalls: Array<unknown>;
 }
 
-function freshCtx(mode: "tui" | "rpc" = "tui") {
+function freshCtx(mode: "tui" | "rpc" | "print" = "tui") {
 	const log: Log = { status: [], notifications: [], customCalls: [] };
 	return {
 		log,
@@ -69,7 +69,7 @@ function harness(opts: { queue?: Array<{ status: "ok"; snapshot: Snapshot }>; de
 			resetBreaker: () => {},
 		}),
 		nowFn: () => now,
-		tty: opts.tty ?? true,
+		interactive: opts.tty ?? true,
 	});
 	install(pi as never);
 	return { pi, calls, detailCalls, tick: (ms: number) => { now += ms; } };
@@ -107,7 +107,7 @@ test("no key anywhere: error notify, no overlay", async () => {
 		keyDepsFor: () => makeKeyDeps({ env: {} }),
 		quotaClientFor: () => ({ fetchQuota: () => Promise.resolve({ status: "error", message: "unreachable" }), fetchDetail: () => Promise.resolve(null), resetBreaker: () => {} }),
 		nowFn: () => 0,
-		tty: true,
+		interactive: true,
 	});
 	install(pi as never);
 	const { ctx, log } = freshCtx();
@@ -125,7 +125,7 @@ test("detail endpoints degrade to quota-only with a note", async () => {
 	assert.deepEqual(h.detailCalls.sort(), ["model-usage", "tool-usage"]);
 });
 
-test("--json in non-tui mode prints JSON to the console", async () => {
+test("--json in print mode prints JSON to the console", async () => {
 	const h = harness();
 	const origLog = console.log;
 	const printed: string[] = [];
@@ -133,7 +133,7 @@ test("--json in non-tui mode prints JSON to the console", async () => {
 		printed.push(a.map(String).join(" "));
 	};
 	try {
-		const { ctx } = freshCtx("rpc");
+		const { ctx } = freshCtx("print");
 		await h.pi.runCommand("glm-usage", "--json", ctx);
 		await settle();
 	} finally {
