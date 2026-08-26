@@ -59,10 +59,10 @@ export function makeKeyDeps(opts: { authRaw?: string | null; env?: Record<string
 export function fakeFetch(
 	responses: Array<{ status: number; body: unknown; headers?: Record<string, string> }>,
 ) {
-	const requests: Array<{ url: string; init: RequestInit }> = [];
+	const requests: Array<{ url: string; headers: Record<string, string> }> = [];
 	let cursor = 0;
 	const fn = (url: string | URL, init?: RequestInit) => {
-		requests.push({ url: String(url), init: init ?? {} });
+		requests.push({ url: String(url), headers: (init?.headers ?? {}) as Record<string, string> });
 		const next = responses[Math.min(cursor, responses.length - 1)];
 		cursor += 1;
 		return Promise.resolve(
