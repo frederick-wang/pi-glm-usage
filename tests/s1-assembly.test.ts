@@ -9,7 +9,7 @@ const GLOBAL = "zai";
 const okStub = () => ({ fetchQuota: () => new Promise<never>(() => {}), fetchDetail: () => Promise.resolve(null), resetBreaker: () => {} });
 function install(depsOpts: Parameters<typeof makeKeyDeps>[0]) {
 	const pi = fakePi();
-	const installFn = createExtension({ keyDepsFor: () => makeKeyDeps(depsOpts), quotaClientFor: okStub });
+	const installFn = createExtension({ env: { PI_GLM_USAGE_LANG: "en" }, keyDepsFor: () => makeKeyDeps(depsOpts), quotaClientFor: okStub });
 	installFn(pi as never);
 	return pi;
 }

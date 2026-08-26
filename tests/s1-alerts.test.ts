@@ -53,6 +53,7 @@ function harness(opts: { queue?: Array<{ status: "ok"; snapshot: Snapshot }>; sa
 	let cursor = 0;
 	let now = Date.UTC(2026, 7, 27, 4, 0, 0);
 	const install = createExtension({
+		env: { PI_GLM_USAGE_LANG: "en" },
 		keyDepsFor: () => makeKeyDeps({ env: { ZAI_CODING_CN_API_KEY: "k" } }),
 		quotaClientFor: () => ({
 			fetchQuota: () => {

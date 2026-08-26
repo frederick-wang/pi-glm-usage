@@ -74,11 +74,19 @@ Factual comparison, as of 2026-08-27 (this package 0.1.0, incumbent 0.1.2):
 | Detailed report command | yes (`/glm-usage`, `--json`) | no |
 | Threshold alerts | yes | no |
 | Backoff / auth circuit breaker | yes | fixed 60s retries |
+| UI message language | en/zh (follows PI_GLM_USAGE_LANG or locale; footer is language-neutral) | English only |
 | Key sources | auth.json → env, conflict warning | auth.json `zai` only |
 | pi peer dependency | `@earendil-works/pi-coding-agent` | pre-rename package name |
 | Published tests | yes | no |
 
 If the incumbent adds China support, this table will be updated or removed.
+
+## Language
+
+The footer is language-neutral. Toasts, the report, and error guidance
+follow `PI_GLM_USAGE_LANG` (`zh` or `en`) when set; otherwise the process
+locale (a deliberately Chinese shell locale counts as intent); otherwise
+English. `--json` output keeps stable English keys for scripts.
 
 ## Privacy
 

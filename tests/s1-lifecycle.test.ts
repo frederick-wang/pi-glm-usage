@@ -93,6 +93,7 @@ function harness(opts: { queue?: QueueItem[]; tty?: boolean } = {}) {
 	const clears: unknown[] = [];
 	const realClearInterval = clearInterval;
 	const install = createExtension({
+		env: { PI_GLM_USAGE_LANG: "en" },
 		keyDepsFor: () => makeKeyDeps({ env: { ZAI_CODING_CN_API_KEY: "k" } }),
 		quotaClientFor,
 		nowFn: () => now,
@@ -176,6 +177,7 @@ test("late response after provider switch is discarded (generation guard)", asyn
 	const pi = fakePi();
 	let releaseFetch: ((v: QueueItem) => void) | null = null;
 	const install = createExtension({
+		env: { PI_GLM_USAGE_LANG: "en" },
 		keyDepsFor: () => makeKeyDeps({ env: { ZAI_CODING_CN_API_KEY: "k" } }),
 		quotaClientFor: () => ({
 			fetchQuota: () =>

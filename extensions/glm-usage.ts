@@ -54,6 +54,74 @@ export function isGlmProvider(provider: string): provider is ProviderId {
 	return provider === "zai-coding-cn" || provider === "zai";
 }
 
+// ---------------------------------------------------------------------------
+// Messages — UI language (toasts, report labels, error guidance). The footer
+// stays language-neutral; --json keeps stable English keys for scripts.
+// Signal: PI_GLM_USAGE_LANG=zh|en overrides; else the process locale (a
+// deliberately set Chinese shell locale counts as intent); else English.
+// All helpers live in this single file: pi's loader treats every .ts under
+// extensions/ as an extension module.
+// ---------------------------------------------------------------------------
+
+export type Lang = "en" | "zh";
+
+export function resolveLang(env: Record<string, string | undefined>): Lang {
+	const explicit = env["PI_GLM_USAGE_LANG"];
+	if (explicit === "zh" || explicit === "en") return explicit;
+	const locale = new Intl.DateTimeFormat().resolvedOptions().locale;
+	return locale.toLowerCase().startsWith("zh") ? "zh" : "en";
+}
+
+type MsgVars = Record<string, string | number>;
+
+const MESSAGES: Record<Lang, Record<string, (v: MsgVars) => string>> = {
+	en: {
+		reportTitle: () => "GLM Usage Report",
+		segName5h: () => "5h window",
+		segNameWeekly: () => "Weekly",
+		segNameMcp: () => "MCP",
+		segNameUnknown: (v) => `unit ${v.unit}`,
+		resetsIn: (v) => `resets in ${v.t}`,
+		modelUsage: () => "Model usage (last 24h):",
+		toolUsage: () => "Tool usage (last 24h):",
+		detailUnavailable: () => "Detail endpoints unavailable for this provider.",
+		pressClose: () => "Press Enter or Esc to close",
+		alertCrossed: (v) => `GLM ${v.label} quota at ${v.pct}% used (crossed ${v.tier}%)`,
+		noKey: (v) => `pi-glm-usage: no API key for ${v.provider}. Add "${v.key}" to auth.json or set ${v.envVar}.`,
+		malformed: () => "pi-glm-usage: auth.json is not valid JSON. Fix the file to activate the usage display.",
+		conflict: (v) => `pi-glm-usage: ${v.envVar} differs from auth.json; using the auth.json key.`,
+		rateLimited: () => "pi-glm-usage: the usage endpoint is rate-limiting; retry shortly.",
+		jsonModeRestricted: () => "pi-glm-usage: --json requires TUI or print mode.",
+		fetchFailed: () => "pi-glm-usage: usage fetch failed.",
+		noKeyAny: () => "pi-glm-usage: no API key found for any GLM provider.",
+	},
+	zh: {
+		reportTitle: () => "GLM 用量报告",
+		segName5h: () => "5小时窗口",
+		segNameWeekly: () => "周配额",
+		segNameMcp: () => "MCP",
+		segNameUnknown: (v) => `单元 ${v.unit}`,
+		resetsIn: (v) => `${v.t} 后重置`,
+		modelUsage: () => "模型用量（近 24 小时）：",
+		toolUsage: () => "工具用量（近 24 小时）：",
+		detailUnavailable: () => "该供应商暂无明细端点。",
+		pressClose: () => "按 Enter 或 Esc 关闭",
+		alertCrossed: (v) => `GLM ${v.label} 配额已用 ${v.pct}%（越过 ${v.tier}%）`,
+		noKey: (v) => `pi-glm-usage：未找到 ${v.provider} 的 API key。请在 auth.json 添加 "${v.key}" 或设置 ${v.envVar}。`,
+		malformed: () => "pi-glm-usage：auth.json 不是有效 JSON，修复后即可显示用量。",
+		conflict: (v) => `pi-glm-usage：${v.envVar} 与 auth.json 的 key 不一致，将使用 auth.json 的。`,
+		rateLimited: () => "pi-glm-usage：用量接口限流中，稍后重试。",
+		jsonModeRestricted: () => "pi-glm-usage：--json 仅支持 TUI 或 print 模式。",
+		fetchFailed: () => "pi-glm-usage：用量获取失败。",
+		noKeyAny: () => "pi-glm-usage：未找到任何 GLM 供应商的 API key。",
+	},
+};
+
+export function msg(lang: Lang, key: string, vars: MsgVars = {}): string {
+	const fn = MESSAGES[lang][key] ?? MESSAGES.en[key];
+	return fn ? fn(vars) : key;
+}
+
 /** Footer status slot — package-namespaced to avoid collisions. */
 export const STATUS_KEY = "pi-glm-usage";
 
@@ -456,7 +524,6 @@ export function evaluateAlerts(
 // Report building — S3 pure helpers (rendered in the overlay / --json).
 // ---------------------------------------------------------------------------
 
-const REPORT_SEGMENT_NAMES: Record<number, string> = { 3: "5h window", 6: "Weekly", 5: "MCP" };
 
 export interface ReportDetail {
 	models: unknown[] | null;
@@ -476,26 +543,35 @@ export function formatDetailItem(item: unknown): string {
 	return JSON.stringify(item);
 }
 
-export function buildReportText(snapshot: Snapshot, detail: ReportDetail, opts: { now: number }): string {
+const REPORT_SEGMENT_KEYS: Record<number, string> = { 3: "segName5h", 6: "segNameWeekly", 5: "segNameMcp" };
+
+export function buildReportText(
+	snapshot: Snapshot,
+	detail: ReportDetail,
+	opts: { now: number; lang?: Lang },
+): string {
+	const lang = opts.lang ?? "en";
 	const lines: string[] = [];
-	lines.push(`GLM Coding Plan usage${snapshot.level ? ` — level: ${snapshot.level}` : ""}`);
+	const usedLabel = lang === "zh" ? "已用" : "used";
+	lines.push(`GLM Coding Plan${snapshot.level ? ` — ${snapshot.level}` : ""}`);
 	for (const l of snapshot.limits) {
-		const name = REPORT_SEGMENT_NAMES[l.unit] ?? `unit ${l.unit}`;
-		const pct = l.percentage === null ? "unknown%" : `${l.percentage}% used`;
+		const key = REPORT_SEGMENT_KEYS[l.unit];
+		const name = key ? msg(lang, key) : msg(lang, "segNameUnknown", { unit: l.unit });
+		const pct = l.percentage === null ? (lang === "zh" ? "未知" : "unknown") + "%" : `${l.percentage}% ${usedLabel}`;
 		const reset = formatReset(l.nextResetTime, opts.now);
-		lines.push(`  ${name.padEnd(12)}${pct}${reset ? `   resets in ${reset}` : ""}`);
+		lines.push(`  ${name.padEnd(lang === "zh" ? 12 : 12)}${pct}${reset ? `   ${msg(lang, "resetsIn", { t: reset })}` : ""}`);
 	}
 	if (detail.models !== null || detail.tools !== null) {
 		if (detail.models !== null) {
-			lines.push("", "Model usage (last 24h, Asia/Shanghai window):");
+			lines.push("", `${msg(lang, "modelUsage")}`);
 			for (const m of detail.models) lines.push(`  ${formatDetailItem(m)}`);
 		}
 		if (detail.tools !== null) {
-			lines.push("", "Tool usage (last 24h):");
+			lines.push("", `${msg(lang, "toolUsage")}`);
 			for (const t of detail.tools) lines.push(`  ${formatDetailItem(t)}`);
 		}
 	} else {
-		lines.push("", "Detail endpoints unavailable for this provider.");
+		lines.push("", msg(lang, "detailUnavailable"));
 	}
 	return lines.join("\n");
 }
@@ -528,6 +604,7 @@ export interface AlertStore {
 
 export interface ExtensionDeps {
 	keyDepsFor(provider: ProviderId): KeyDeps;
+	env?: Record<string, string | undefined>;
 	quotaClientFor(provider: ProviderId): QuotaClientLike;
 	nowFn?(): number;
 	/** Test override for the interactive-mode check. */
@@ -571,6 +648,7 @@ export function createExtension(deps: ExtensionDeps) {
 		// Persistent UI handle for interval-driven re-renders (countdown ticks).
 		let lastUi: UiLike | null = null;
 		let alertState: AlertState | null = null;
+		const lang = resolveLang(deps.env ?? {});
 		const alertStore: AlertStore =
 			deps.alertStore ?? {
 				save: (s) => {
@@ -629,7 +707,7 @@ export function createExtension(deps: ExtensionDeps) {
 						for (const e of alerts.emitted) {
 							const label = FOOTER_LABELS[e.unit] ?? `unit ${e.unit}`;
 							const pct = res.snapshot.limits.find((l) => l.unit === e.unit)?.percentage ?? "?";
-							ui.notify(`GLM ${label} quota at ${pct}% used (crossed ${e.tier}%)`, e.tier === 95 ? "error" : "warning");
+							ui.notify(msg(lang, "alertCrossed", { label, pct: String(pct), tier: String(e.tier) }), e.tier === 95 ? "error" : "warning");
 						}
 					} else if (res.status === "retry") {
 						lastFetchAt = now() + res.retryAfterMs;
@@ -668,10 +746,7 @@ export function createExtension(deps: ExtensionDeps) {
 				case "conflict": {
 					if (res.status === "conflict" && !warnedConflict.has(provider)) {
 						warnedConflict.add(provider);
-						ctx.ui.notify(
-							`pi-glm-usage: ${cfg.envVar} differs from auth.json; using the auth.json key.`,
-							"warning",
-						);
+						ctx.ui.notify(msg(lang, "conflict", { envVar: cfg.envVar }), "warning");
 					}
 					active = provider;
 					apiKey = res.key;
@@ -687,10 +762,7 @@ export function createExtension(deps: ExtensionDeps) {
 					apiKey = null;
 					if (!warnedMalformed.has(provider)) {
 						warnedMalformed.add(provider);
-						ctx.ui.notify(
-							"pi-glm-usage: auth.json is not valid JSON. Fix the file to activate the usage display.",
-							"error",
-						);
+						ctx.ui.notify(msg(lang, "malformed"), "error");
 					}
 					ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("error", "GLM auth.json error"));
 					break;
@@ -700,10 +772,7 @@ export function createExtension(deps: ExtensionDeps) {
 					apiKey = null;
 					if (!warnedNoKey.has(provider)) {
 						warnedNoKey.add(provider);
-						ctx.ui.notify(
-							`pi-glm-usage: no API key for ${provider}. Add "${cfg.authJsonKey}" to auth.json or set ${cfg.envVar}.`,
-							"warning",
-						);
+						ctx.ui.notify(msg(lang, "noKey", { provider, key: cfg.authJsonKey, envVar: cfg.envVar }), "warning");
 					}
 					ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("dim", "GLM no key"));
 					break;
@@ -717,7 +786,7 @@ export function createExtension(deps: ExtensionDeps) {
 					// Zero-dependency overlay: plain text lines joined per render.
 					// Enter (\r / \n) and Esc (\x1b) close; factory args provide
 					// the theme, so no runtime import from pi-tui is needed.
-					const lines = [`  ${theme.fg("accent", "GLM Usage Report")}`, "", ...text.split("\n"), "", `  ${theme.fg("dim", "Press Enter or Esc to close")}`];
+					const lines = [`  ${theme.fg("accent", msg(lang, "reportTitle"))}`, "", ...text.split("\n"), "", `  ${theme.fg("dim", msg(lang, "pressClose"))}`];
 					return {
 						render: (width: number) => lines.map((l) => l.slice(0, Math.max(0, width))).join("\n"),
 						invalidate: () => {},
@@ -747,7 +816,7 @@ export function createExtension(deps: ExtensionDeps) {
 					}
 				}
 				if (provider === null || key === null) {
-					ctx.ui.notify("pi-glm-usage: no API key found for any GLM provider.", "error");
+					ctx.ui.notify(msg(lang, "noKeyAny"), "error");
 					return;
 				}
 				const client = deps.quotaClientFor(provider);
@@ -755,7 +824,7 @@ export function createExtension(deps: ExtensionDeps) {
 				if (res.status !== "ok") {
 					ctx.ui.notify(
 						res.status === "retry"
-							? "pi-glm-usage: the usage endpoint is rate-limiting; retry shortly."
+							? msg(lang, "rateLimited")
 							: (res as { message?: string }).message ?? "pi-glm-usage: usage fetch failed.",
 						"error",
 					);
@@ -784,11 +853,11 @@ export function createExtension(deps: ExtensionDeps) {
 						// Only print mode owns stdout; RPC stdout is the protocol.
 						console.log(payload);
 					} else {
-						ctx.ui.notify("pi-glm-usage: --json requires TUI or print mode.", "warning");
+						ctx.ui.notify(msg(lang, "jsonModeRestricted"), "warning");
 					}
 					return;
 				}
-				const text = buildReportText(res.snapshot, { models: models?.items ?? null, tools: tools?.items ?? null }, { now: now() });
+				const text = buildReportText(res.snapshot, { models: models?.items ?? null, tools: tools?.items ?? null }, { now: now(), lang });
 				if (ctx.mode === "tui") {
 					await showOverlay(text, ctx);
 				} else {
@@ -889,5 +958,5 @@ export default function glmUsage(pi: ExtensionAPI): void {
 		}
 		return c;
 	};
-	createExtension({ keyDepsFor, quotaClientFor })(pi);
+	createExtension({ env: process.env as Record<string, string | undefined>, keyDepsFor, quotaClientFor })(pi);
 }
