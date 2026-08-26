@@ -5,13 +5,12 @@
  * monitor endpoints (undocumented; observed in Zhipu's official tooling) while
  * a Zhipu plan provider (`zai-coding-cn` / `zai`) is active.
  *
- * Ticket 01 scope: provider map, key resolution (auth.json → env, pi
- * precedence), failure states surfaced through notify/footer, lifecycle
- * scaffolding. Quota fetching, footer rendering, alerts, and the report
- * command arrive in later tickets (issues #3–#6).
+ * Layout: provider map, key resolution, footer rendering helpers, quota
+ * snapshot parser, monitor-endpoint client, extension assembly. Threshold
+ * alerts and the report command arrive in later tickets (issues #5–#6).
  *
  * Erasable-syntax TypeScript only (Node type stripping runs this file
- * directly): no enums, no namespaces, no parameter properties.
+ * directly; tsconfig enforces erasableSyntaxOnly).
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -26,8 +25,6 @@ import * as nodePath from "node:path";
 export type ProviderId = "zai-coding-cn" | "zai";
 
 export interface ProviderConfig {
-	/** Short footer label. */
-	label: string;
 	/** Monitor API base URL. */
 	baseUrl: string;
 	/** Key under which pi stores the credential in auth.json. */
@@ -40,14 +37,12 @@ export interface ProviderConfig {
 
 export const PROVIDERS: Record<ProviderId, ProviderConfig> = {
 	"zai-coding-cn": {
-		label: "GLM",
 		baseUrl: "https://open.bigmodel.cn",
 		authJsonKey: "zai-coding-cn",
 		envVar: "ZAI_CODING_CN_API_KEY",
 		preferredScheme: "raw",
 	},
 	zai: {
-		label: "GLM",
 		baseUrl: "https://api.z.ai",
 		authJsonKey: "zai",
 		envVar: "ZAI_API_KEY",
@@ -61,6 +56,8 @@ export function isGlmProvider(provider: string): provider is ProviderId {
 
 /** Footer status slot — package-namespaced to avoid collisions. */
 export const STATUS_KEY = "pi-glm-usage";
+
+const HOUR_MS = 3_600_000;
 
 // ---------------------------------------------------------------------------
 // Key resolution — pure, injectable. Mirrors pi's own precedence:
@@ -131,74 +128,81 @@ export function piAgentDir(env: Record<string, string | undefined>, homedir: str
 }
 
 // ---------------------------------------------------------------------------
-// Extension assembly — S1 seam. All effects go through ctx.ui; every
-// degradation is a footer/notify state, never a thrown error.
+// Footer rendering — S3 pure helpers.
 // ---------------------------------------------------------------------------
 
-export interface ExtensionDeps {
-	keyDepsFor(provider: ProviderId): KeyDeps;
+/** Footer labels for known units; unknown units are omitted from the footer. */
+const FOOTER_LABELS: Record<number, string> = { 3: "5h", 6: "W", 5: "M" };
+const FOOTER_ORDER = [3, 6, 5];
+const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] as const;
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"] as const;
+
+export interface FooterTheme {
+	fg(role: string, text: string): string;
 }
 
-export function createExtension(deps: ExtensionDeps) {
-	return function install(pi: ExtensionAPI): void {
-		// Generation counter: bumped on every model switch and shutdown so
-		// late async work from a previous provider can be discarded (used by
-		// later tickets; incremented here so the invariant exists from day 1).
-		let generation = 0;
-		const warnedConflict = new Set<ProviderId>();
-		const warnedNoKey = new Set<ProviderId>();
-		const warnedMalformed = new Set<ProviderId>();
+function colorRoleFor(pct: number | null): string {
+	if (pct === null) return "dim";
+	if (pct < 50) return "success";
+	if (pct < 80) return "warning";
+	return "error";
+}
 
-		pi.on("model_select", async (event, ctx) => {
-			generation += 1;
-			const provider = event.model.provider;
-			if (!isGlmProvider(provider)) {
-				ctx.ui.setStatus(STATUS_KEY, "");
-				return;
-			}
-			const cfg = PROVIDERS[provider];
-			const res = resolveKey(provider, deps.keyDepsFor(provider));
-			switch (res.status) {
-				case "ok":
-					ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("dim", cfg.label));
-					break;
-				case "conflict":
-					if (!warnedConflict.has(provider)) {
-						warnedConflict.add(provider);
-						ctx.ui.notify(
-							`pi-glm-usage: ${cfg.envVar} differs from auth.json; using the auth.json key.`,
-							"warning",
-						);
-					}
-					ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("dim", cfg.label));
-					break;
-				case "malformed":
-					if (!warnedMalformed.has(provider)) {
-						warnedMalformed.add(provider);
-						ctx.ui.notify(
-							"pi-glm-usage: auth.json is not valid JSON. Fix the file to activate the usage display.",
-							"error",
-						);
-					}
-					ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("error", "GLM auth.json error"));
-					break;
-				case "no-key":
-					if (!warnedNoKey.has(provider)) {
-						warnedNoKey.add(provider);
-						ctx.ui.notify(
-							`pi-glm-usage: no API key for ${provider}. Add "${cfg.authJsonKey}" to auth.json or set ${cfg.envVar}.`,
-							"warning",
-						);
-					}
-					ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("dim", "GLM no key"));
-					break;
-			}
-		});
+/** Human-readable remaining time for a reset timestamp; "" when past/invalid. */
+export function formatReset(resetMs: number | undefined, now: number): string {
+	if (resetMs === undefined || !Number.isFinite(resetMs) || resetMs <= now) return "";
+	const diff = resetMs - now;
+	if (diff < 24 * HOUR_MS) {
+		const h = Math.floor(diff / HOUR_MS);
+		const m = Math.floor((diff % HOUR_MS) / 60_000);
+		return h > 0 ? `${h}h ${m}m` : `${m}m`;
+	}
+	const at = new Date(resetMs);
+	if (diff < 7 * 24 * HOUR_MS) {
+		const hh = String(at.getHours()).padStart(2, "0");
+		const mm = String(at.getMinutes()).padStart(2, "0");
+		return `${WEEKDAYS[at.getDay()]} ${hh}:${mm}`;
+	}
+	return `${MONTHS[at.getMonth()]}${String(at.getDate()).padStart(2, "0")}`;
+}
 
-		pi.on("session_shutdown", async () => {
-			generation += 1;
-		});
-	};
+export function renderFooter(snapshot: Snapshot, opts: { now: number; stale?: boolean; theme?: FooterTheme }): string {
+	const displayed = FOOTER_ORDER.filter((u) => snapshot.limits.some((l) => l.unit === u)).slice(0, 2);
+	const parts = displayed.map((unit) => ({ unit, limit: snapshot.limits.find((l) => l.unit === unit)! }));
+	const nearest = parts
+		.filter((p) => p.limit.nextResetTime !== undefined)
+		.sort((a, b) => (a.limit.nextResetTime ?? 0) - (b.limit.nextResetTime ?? 0))[0];
+	const segs = parts.map((p, i) => {
+		const pctText = p.limit.percentage === null ? "?" : String(p.limit.percentage);
+		const staleSuffix = opts.stale && i === 0 ? "~" : "";
+		const chunk = `${FOOTER_LABELS[p.unit]} ${pctText}%${staleSuffix}`;
+		const colored = opts.theme ? opts.theme.fg(colorRoleFor(p.limit.percentage), chunk) : chunk;
+		const reset = nearest && nearest.unit === p.unit ? formatReset(p.limit.nextResetTime, opts.now) : "";
+		return reset ? `${colored}↻${reset}` : colored;
+	});
+	return `GLM ${segs.join("·")}`;
+}
+
+const shanghaiFormatter = new Intl.DateTimeFormat("en-CA", {
+	timeZone: "Asia/Shanghai",
+	hourCycle: "h23",
+	year: "numeric",
+	month: "2-digit",
+	day: "2-digit",
+	hour: "2-digit",
+	minute: "2-digit",
+	second: "2-digit",
+});
+
+/** ADR-0002: monitor-endpoint window params are naive Asia/Shanghai time. */
+export function formatShanghaiTimestamp(ms: number): string {
+	const parts = Object.fromEntries(shanghaiFormatter.formatToParts(new Date(ms)).map((p) => [p.type, p.value]));
+	return `${parts["year"]}-${parts["month"]}-${parts["day"]} ${parts["hour"]}:${parts["minute"]}:${parts["second"]}`;
+}
+
+/** Detail-window params: yesterday-same-hour → now, in Asia/Shanghai. */
+export function shanghaiWindow(nowMs: number): { startTime: string; endTime: string } {
+	return { startTime: formatShanghaiTimestamp(nowMs - 24 * HOUR_MS), endTime: formatShanghaiTimestamp(nowMs) };
 }
 
 // ---------------------------------------------------------------------------
@@ -269,11 +273,8 @@ export interface QuotaClientDeps {
 }
 
 interface SchemeState {
-	/** Preferred scheme failed once and the other one worked. */
 	scheme: "raw" | "bearer";
-	/** Consecutive rejections on both schemes. */
 	consecutiveAuthFailures: number;
-	/** Breaker open: refuse further requests until resetBreaker(). */
 	breakerOpen: boolean;
 }
 
@@ -282,8 +283,7 @@ export function createQuotaClient(provider: ProviderId, deps: QuotaClientDeps) {
 	const timeoutMs = deps.timeoutMs ?? 4000;
 	const state: SchemeState = { scheme: cfg.preferredScheme, consecutiveAuthFailures: 0, breakerOpen: false };
 
-	const authorization = (scheme: "raw" | "bearer", key: string) =>
-		scheme === "raw" ? key : `Bearer ${key}`;
+	const authorization = (scheme: "raw" | "bearer", key: string) => (scheme === "raw" ? key : `Bearer ${key}`);
 
 	async function attempt(key: string, scheme: "raw" | "bearer"): Promise<Response> {
 		return deps.fetchImpl(`${cfg.baseUrl}/api/monitor/usage/quota/limit`, {
@@ -321,7 +321,7 @@ export function createQuotaClient(provider: ProviderId, deps: QuotaClientDeps) {
 			}
 			if (fallback.status === 401) {
 				state.consecutiveAuthFailures += 1;
-			if (state.consecutiveAuthFailures >= 2) state.breakerOpen = true;
+				if (state.consecutiveAuthFailures >= 2) state.breakerOpen = true;
 				return { status: "error", message: ERR_AUTH };
 			}
 			state.scheme = other(state.scheme);
@@ -337,7 +337,6 @@ export function createQuotaClient(provider: ProviderId, deps: QuotaClientDeps) {
 		} catch {
 			return { status: "error", message: ERR_PARSE };
 		}
-		// Any 2xx carries the envelope; parseQuotaResponse validates the shape.
 		const snapshot = parseQuotaResponse(body);
 		if (!snapshot) return { status: "error", message: ERR_PARSE };
 		state.consecutiveAuthFailures = 0;
@@ -361,23 +360,238 @@ function parseRetryAfter(value: string | null): number {
 	return 60_000;
 }
 
+// ---------------------------------------------------------------------------
+// Extension assembly — S1 seam. All effects go through ctx.ui; every
+// degradation is a footer/notify state, never a thrown error.
+// ---------------------------------------------------------------------------
+
+export interface QuotaClientLike {
+	fetchQuota(key: string): Promise<QuotaResult>;
+	resetBreaker(): void;
+}
+
+export interface UiLike {
+	setStatus(key: string, text: string): void;
+	notify(message: string, level?: string): void;
+	theme: FooterTheme;
+}
+
+export interface ExtensionDeps {
+	keyDepsFor(provider: ProviderId): KeyDeps;
+	quotaClientFor(provider: ProviderId): QuotaClientLike;
+	nowFn?(): number;
+	tty?: boolean;
+	setInterval?: typeof setInterval;
+	clearInterval?: typeof clearInterval;
+}
+
+const THROTTLE_MS = 180_000;
+const THROTTLE_HIGH_USAGE_MS = 60_000;
+const COUNTDOWN_TICK_MS = 30_000;
+
+export function createExtension(deps: ExtensionDeps) {
+	const now = () => (deps.nowFn ?? Date.now)();
+	const setIntervalImpl = deps.setInterval ?? setInterval;
+	const clearIntervalImpl = deps.clearInterval ?? clearInterval;
+	const tty = deps.tty ?? (typeof process !== "undefined" && process.stdout?.isTTY === true);
+	return function install(pi: ExtensionAPI): void {
+		// Generation counter: bumped on every model switch and shutdown so
+		// late async work from a previous provider/state is discarded.
+		let generation = 0;
+		const warnedConflict = new Set<ProviderId>();
+		const warnedNoKey = new Set<ProviderId>();
+		const warnedMalformed = new Set<ProviderId>();
+
+		let active: ProviderId | null = null;
+		let apiKey: string | null = null;
+		let snapshot: Snapshot | null = null;
+		let stale = false;
+		let lastFetchAt = Number.NEGATIVE_INFINITY;
+		let inFlight = false;
+		let timer: ReturnType<typeof setIntervalImpl> | null = null;
+		let timerRunning = false;
+		// Persistent UI handle for interval-driven re-renders (countdown ticks).
+		let lastUi: UiLike | null = null;
+
+		const throttleMs = () =>
+			snapshot && snapshot.limits.some((l) => (l.unit === 3 || l.unit === 6) && (l.percentage ?? 0) >= 80)
+				? THROTTLE_HIGH_USAGE_MS
+				: THROTTLE_MS;
+
+		function clearTimer(): void {
+			if (timer !== null) {
+				clearIntervalImpl(timer as never);
+				timer = null;
+			}
+			timerRunning = false;
+		}
+
+		function render(ui: UiLike): void {
+			if (active === null) {
+				ui.setStatus(STATUS_KEY, "");
+				return;
+			}
+			if (snapshot === null) {
+				ui.setStatus(STATUS_KEY, ui.theme.fg("dim", "GLM …"));
+				return;
+			}
+			ui.setStatus(STATUS_KEY, renderFooter(snapshot, { now: now(), stale, theme: ui.theme }));
+		}
+
+		function refresh(ctx: { ui: UiLike }, force = false): void {
+			lastUi = ctx.ui;
+			if (!tty || active === null || apiKey === null || inFlight) return;
+			if (!force && now() - lastFetchAt < throttleMs()) return;
+			inFlight = true;
+			lastFetchAt = now();
+			const gen = generation;
+			const ui = ctx.ui;
+			deps.quotaClientFor(active)
+				.fetchQuota(apiKey)
+				.then((res) => {
+					if (gen !== generation) return;
+					if (res.status === "ok") {
+						snapshot = res.snapshot;
+						stale = false;
+					} else if (res.status === "retry") {
+						lastFetchAt = now() + res.retryAfterMs;
+					} else if (snapshot !== null) {
+						stale = true;
+					}
+					render(ui);
+				})
+				.catch(() => {
+					if (gen !== generation) return;
+					if (snapshot !== null) stale = true;
+					render(ui);
+				})
+				.finally(() => {
+					inFlight = false;
+				});
+		}
+
+		pi.on("model_select", async (event, ctx) => {
+			generation += 1;
+			lastUi = ctx.ui;
+			const provider = event.model.provider;
+			if (!isGlmProvider(provider)) {
+				active = null;
+				apiKey = null;
+				snapshot = null;
+				stale = false;
+				clearTimer();
+				ctx.ui.setStatus(STATUS_KEY, "");
+				return;
+			}
+			const cfg = PROVIDERS[provider];
+			const res = resolveKey(provider, deps.keyDepsFor(provider));
+			switch (res.status) {
+				case "ok":
+				case "conflict": {
+					if (res.status === "conflict" && !warnedConflict.has(provider)) {
+						warnedConflict.add(provider);
+						ctx.ui.notify(
+							`pi-glm-usage: ${cfg.envVar} differs from auth.json; using the auth.json key.`,
+							"warning",
+						);
+					}
+					active = provider;
+					apiKey = res.key;
+					snapshot = null;
+					stale = false;
+					deps.quotaClientFor(provider).resetBreaker();
+					render(ctx.ui);
+					refresh(ctx, true);
+					break;
+				}
+				case "malformed": {
+					active = null;
+					apiKey = null;
+					if (!warnedMalformed.has(provider)) {
+						warnedMalformed.add(provider);
+						ctx.ui.notify(
+							"pi-glm-usage: auth.json is not valid JSON. Fix the file to activate the usage display.",
+							"error",
+						);
+					}
+					ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("error", "GLM auth.json error"));
+					break;
+				}
+				case "no-key": {
+					active = null;
+					apiKey = null;
+					if (!warnedNoKey.has(provider)) {
+						warnedNoKey.add(provider);
+						ctx.ui.notify(
+							`pi-glm-usage: no API key for ${provider}. Add "${cfg.authJsonKey}" to auth.json or set ${cfg.envVar}.`,
+							"warning",
+						);
+					}
+					ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("dim", "GLM no key"));
+					break;
+				}
+			}
+		});
+
+		pi.on("session_start", async (_event, ctx) => {
+			if (active !== null && apiKey !== null) refresh(ctx, false);
+		});
+
+		pi.on("turn_end", async (_event, ctx) => {
+			refresh(ctx, false);
+		});
+
+		pi.on("agent_start", async (_event, ctx) => {
+			lastUi = ctx.ui;
+			if (!tty || active === null || timerRunning) return;
+			timerRunning = true;
+			timer = setIntervalImpl(() => {
+				// Countdown re-render from the cached snapshot; no network.
+				if (lastUi && snapshot !== null && active !== null) render(lastUi);
+			}, COUNTDOWN_TICK_MS);
+			timer?.unref?.();
+		});
+
+		pi.on("agent_end", async () => {
+			clearTimer();
+		});
+
+		pi.on("session_shutdown", async () => {
+			generation += 1;
+			clearTimer();
+		});
+	};
+}
+
+// ---------------------------------------------------------------------------
+// Default export — real filesystem/environment/network wiring.
+// ---------------------------------------------------------------------------
+
 export default function glmUsage(pi: ExtensionAPI): void {
 	const homedir = nodeOs.homedir();
-	createExtension({
-		keyDepsFor(provider) {
-			void provider;
-			const env = process.env as Record<string, string | undefined>;
-			return {
-				configDir: piAgentDir(env, homedir),
-				env,
-				readFile(path) {
-					try {
-						return nodeFs.readFileSync(path, "utf8");
-					} catch {
-						return null;
-					}
-				},
-			};
-		},
-	})(pi);
+	const keyDepsFor = (provider: ProviderId): KeyDeps => {
+		void provider;
+		const env = process.env as Record<string, string | undefined>;
+		return {
+			configDir: piAgentDir(env, homedir),
+			env,
+			readFile(path) {
+				try {
+					return nodeFs.readFileSync(path, "utf8");
+				} catch {
+					return null;
+				}
+			},
+		};
+	};
+	const clients = new Map<ProviderId, QuotaClientLike>();
+	const quotaClientFor = (provider: ProviderId): QuotaClientLike => {
+		let c = clients.get(provider);
+		if (!c) {
+			c = createQuotaClient(provider, { fetchImpl: fetch });
+			clients.set(provider, c);
+		}
+		return c;
+	};
+	createExtension({ keyDepsFor, quotaClientFor })(pi);
 }
