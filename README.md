@@ -57,7 +57,7 @@ GLM 5h quota at 85% used (crossed 80%)
 ```
 
 Jitter around a threshold does not re-emit. A drop of 20 points or more
-re-arms the tier. Alert state survives restarts (stored in the session file).
+re-arms the tier (the next crossing notifies again). Alert state survives restarts (stored in the session file).
 
 ### `/glm-usage`
 
@@ -84,7 +84,7 @@ window, detail arrays) instead of the overlay — TUI and print mode only.
 ### Refresh behavior
 
 Fetches on activation and on `/glm-usage`; after each turn at most every
-180 s (60 s once any token window is ≥ 80%). 429/5xx backs off honoring
+180 s (60 s once any token window is at ≥ 80% used). 429/5xx backs off honoring
 `Retry-After`. Rejected credentials trip a breaker after two failed rounds
 and stop requesting until the next model switch or `/glm-usage`. Headless
 runs (`pi -p`) make no requests.

@@ -2,11 +2,11 @@
 
 **[English](./README.md)** | 简体中文
 
-> **非官方项目。** 与智谱 AI / Z.ai 无关联。通过智谱官方工具中观察到的 GLM Coding Plan
-> 用量监控端点读取数据；这些端点未经文档化，可能随时变更且不另行通知。本包可能在任何时候失效。
+> **非官方项目。** 与智谱 AI / Z.ai 无关联。数据来自 GLM Coding Plan 的用量监控端点——
+> 该端点未经官方文档化（实现参考了智谱官方工具中的调用方式），可能随时变更或失效。
 
 在 [pi coding agent](https://github.com/earendil-works/pi-mono) 底部状态栏显示 GLM Coding Plan
-（国内版 / 国际版）配额用量，附带阈值提醒与详细的 `/glm-usage` 报告命令。
+（国内版 / 国际版）配额用量，提供阈值提醒和 `/glm-usage` 用量报告。
 
 ```
 GLM 5h 34%↻1h40m·W 2%
@@ -24,27 +24,27 @@ GLM 5h 34%↻2h 40m·W 2%
 
 | 元素 | 含义 |
 | --- | --- |
-| `5h` / `W` / `M` | 5 小时滚动 token 窗口 / 周配额 / MCP 月度配额；至多显示两段（先 5h，再 W 或 M） |
+| `5h` / `W` / `M` | 5 小时滚动 token 窗口 / 周配额 / MCP 月度配额；最多显示两段（先 5h，再 W 或 M） |
 | `34%` | 该窗口已用百分比（整数，0–100） |
-| `↻2h 40m` | 最近重置段的剩余时间；每 30 秒本地重算，不发网络请求；7 天内显示星期+时间（`↻Sat 05:00`），更远显示日期（`↻Sep06`） |
+| `↻2h 40m` | 距下一次重置的剩余时间（取最先重置的窗口），每 30 秒在本地重算，不发网络请求；7 天内显示星期和时间（`↻Sat 05:00`），更远显示日期（`↻Sep06`） |
 | `~` | 显示值为过期数据：上次刷新失败，保留旧值 |
 | 颜色 | 绿 < 50%，黄 50–79%，红 ≥ 80% |
 
 ### 阈值提醒
 
-用量越过 80% 或 95% 时，每个配额窗口每档提示一次：
+用量越过 80% 或 95% 时提醒一次，同一配额窗口、同一档位不重复提醒：
 
 ```
 GLM 5h 配额已用 85%（越过 80%）
 ```
 
-阈值附近抖动不重复提示；回落 20 个百分点及以上重新武装该档；
+用量在阈值附近来回波动时不会重复提示；用量回落 20 个百分点以上后，再次越过阈值会重新提示。
 提醒状态写入会话文件，重启后仍生效。
 
 ### `/glm-usage`
 
-打开覆盖层，显示全部配额段与近 24 小时按模型 / 按工具用量
-（明细端点已在国内版套餐验证；国际版降级为仅配额）：
+打开覆盖层，显示全部配额段，以及近 24 小时按模型、按工具的用量明细。
+明细端点已在国内版套餐上验证；国际版端点未验证，请求失败时报告只显示配额部分：
 
 ```
 GLM Coding Plan — max
@@ -57,21 +57,21 @@ Model usage (last 24h):
   GLM-4.7  296701
 ```
 
-（示例为英文界面；中文界面文案见上文"界面语言"。）
+（示例取自英文界面。中文界面对应显示为：5小时窗口、周配额、"2h 40m 后重置"等，见下文"界面语言"。）
 
 `/glm-usage --json` 输出原始合并数据（配额快照、查询窗口、明细数组），
 仅支持 TUI 与 print 模式。
 
 ### 刷新行为
 
-激活时与 `/glm-usage` 时获取；每轮对话后至多每 180 秒一次
-（任一 token 窗口 ≥ 80% 后收紧到 60 秒）。429/5xx 遵循 `Retry-After` 退避；
-凭据被拒两轮后熔断，停止请求，直到下次切换模型或执行 `/glm-usage`。
-无头运行（`pi -p`）不发任何请求。
+激活时和执行 `/glm-usage` 时各请求一次；每轮对话结束后，每 180 秒最多请求一次
+（任一 token 窗口用量 ≥ 80% 后缩短为 60 秒）。收到 429 或 5xx 时按 `Retry-After` 退避；
+连续两次凭据校验失败后熔断，不再请求，直到下次切换模型或执行 `/glm-usage`。
+`pi -p` 无头模式不发任何请求。
 
 ## 安装
 
-npm（推荐——可被 [包画廊](https://pi.dev/packages) 索引）：
+npm（会被 [pi 包目录](https://pi.dev/packages) 收录）：
 
 ```bash
 pi install npm:@zhaoji-wang/pi-glm-usage
@@ -83,29 +83,29 @@ pi install npm:@zhaoji-wang/pi-glm-usage
 pi install git:github.com/frederick-wang/pi-glm-usage
 ```
 
-## Key 配置
+## 密钥配置
 
-本扩展遵循 pi 自身的凭据优先级：
+密钥解析顺序与 pi 一致：
 
 1. `~/.pi/agent/auth.json`（或 `$PI_CODING_AGENT_DIR/auth.json`）——国内版写入
    `"zai-coding-cn": { "type": "api_key", "key": "…" }`，国际版写入 `"zai": { … }`；
 2. 否则读取环境变量 `ZAI_CODING_CN_API_KEY` / `ZAI_API_KEY`。
 
-两者同时存在且不一致时，提示一次警告并使用 auth.json 的 key（pi 的优先级）。
-auth.json 损坏时给出明确错误，而不是静默改用其他账号的凭据。
+两者同时存在且取值不同时，警告一次，然后使用 auth.json 中的 key（与 pi 的优先级一致）。
+auth.json 存在但无法解析时，给出明确错误，不会静默改用环境变量里其他账号的凭据。
 
 ## 界面语言
 
 状态栏本身为语言中立的符号。提示、报告与错误指引遵循 `PI_GLM_USAGE_LANG`（`zh` 或 `en`）；
-未设置时读取进程 locale（特意设置的中文 shell locale 视为中文意图）；否则为英文。
-`--json` 输出对脚本消费者保持稳定的英文字段。
+未设置时读取进程 locale——用户显式设置的中文 locale 视为需要中文；再否则为英文。
+`--json` 的输出字段固定为英文，供脚本读取。
 
 ## 为什么有这个包
 
-npm 上已存在一个未加 scope 的 `pi-glm-usage`。对比（截至 2026-08-27，
-本包 0.1.1，incumbent 0.1.2；与英文版表格内容一致）：
+npm 上已存在同名的无 scope 包 `pi-glm-usage`。对比（截至 2026-08-27，
+本包 0.1.1，现有包 0.1.2；内容与英文版表格一致）：
 
-| | @zhaoji-wang/pi-glm-usage | 未加 scope 的 pi-glm-usage |
+| | @zhaoji-wang/pi-glm-usage | 无 scope 的 pi-glm-usage |
 | --- | --- | --- |
 | 国内版端点（open.bigmodel.cn） | 支持 | 不支持 |
 | 国际版端点（api.z.ai） | 支持 | 支持 |
@@ -116,31 +116,30 @@ npm 上已存在一个未加 scope 的 `pi-glm-usage`。对比（截至 2026-08-
 | 界面消息语言 | 中/英（`PI_GLM_USAGE_LANG` 或 locale；状态栏语言中立） | 仅英文 |
 | Key 来源 | auth.json → 环境变量，冲突时警告 | 仅 auth.json 的 `zai` |
 | pi peer 依赖 | `@earendil-works/pi-coding-agent` | 改名前的旧包名 |
-| 随包发布测试 | 有 | 无 |
+| 公开的单元测试 | 有 | 无 |
 
-若 incumbent 增加国内版支持，此表将更新或移除（两份语言版本同步更新）。
+若现有包增加国内版支持，此表将更新或移除（中英文两份同步修改）。
 
 ## 隐私
 
-无遥测。API key 仅在本地读取，且只用于请求套餐自身的监控端点
-（`open.bigmodel.cn` / `api.z.ai`）；没有任何数据发往其他地方。提醒去重状态保存在本地 pi 会话文件中。
+不采集任何数据。API key 只在本地读取，仅用于请求套餐自身的监控端点
+（`open.bigmodel.cn` / `api.z.ai`）。提醒去重状态保存在本地 pi 会话文件中。
 
 ## 限制
 
-- Node 内置 `fetch` 不读取 `HTTPS_PROXY`；若 pi 本身能通过代理工作而状态栏显示过期数据，原因即在此。
-- 监控端点未经文档化。百分比语义已在国内版套餐上实测验证（已用百分比，0–100）；
-  未知配额单元代码在状态栏中被忽略，在报告中以通用形式呈现。
+- Node 内置 `fetch` 不读取 `HTTPS_PROXY` 代理设置；如果 pi 本身能通过代理正常使用，而状态栏一直显示过期数据，原因在这里。
+- 监控端点没有官方文档。百分比语义在国内版套餐上实测验证过：已用百分比，取值 0–100。
+  未知单元代码在状态栏中忽略，在报告中以"单元 N"的形式显示。
 
 ## 开发
 
-本仓库使用 pnpm（见 `package.json` 的 `packageManager` 字段）。需要 Node ≥ 23.6（原生 TypeScript
-类型剥离）；CI 使用 Node 24。
+本仓库使用 pnpm（版本见 `package.json` 的 `packageManager` 字段）。本地开发需要 Node ≥ 23.6（直接运行 TypeScript），CI 使用 Node 24。
 
 ```bash
 pnpm install
 pnpm run typecheck
 pnpm test
-pnpm run live-check  # 解析真实 key 并获取一次快照
+pnpm run live-check  # 读取本机密钥并请求一次真实用量
 ```
 
 MIT 许可证（见 [LICENSE](./LICENSE)）。
