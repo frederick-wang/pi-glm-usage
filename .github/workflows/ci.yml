@@ -17,10 +17,10 @@ jobs:
         node: [24]
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/setup-node@v7
+      - name: Install pnpm and Node.js
+        uses: pnpm/setup@c9883cc79df532ad1a7b81bf9ab944ceb090d65c # v2.0.0
         with:
-          node-version: ${{ matrix.node }}
-          cache: npm
-      - run: npm ci
-      - run: npm run typecheck
-      - run: npm test
+          runtime: node@${{ matrix.node }}
+          cache: true
+      - run: pnpm run typecheck
+      - run: pnpm test

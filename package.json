@@ -41,5 +41,6 @@
     "typecheck": "tsc --noEmit",
     "test": "node --test 'tests/*.test.ts'",
     "live-check": "node scripts/live-check.ts"
-  }
+  },
+  "packageManager": "pnpm@11.24.0"
 }
