@@ -102,9 +102,23 @@ auth.json 损坏时给出明确错误，而不是静默改用其他账号的凭�
 
 ## 为什么有这个包
 
-npm 上已存在一个未加 scope 的 `pi-glm-usage`。事实性对比见
-[英文版 README](./README.md#why-another-package)（截至 2026-08-27，本包 0.1.1，incumbent 0.1.2）；
-若 incumbent 增加国内版支持，该表将更新或移除。
+npm 上已存在一个未加 scope 的 `pi-glm-usage`。对比（截至 2026-08-27，
+本包 0.1.1，incumbent 0.1.2；与英文版表格内容一致）：
+
+| | @zhaoji-wang/pi-glm-usage | 未加 scope 的 pi-glm-usage |
+| --- | --- | --- |
+| 国内版端点（open.bigmodel.cn） | 支持 | 不支持 |
+| 国际版端点（api.z.ai） | 支持 | 支持 |
+| 切换供应商时清除状态栏 | 会 | 不会（始终显示） |
+| 详细报告命令 | 有（`/glm-usage`、`--json`） | 无 |
+| 阈值提醒 | 有 | 无 |
+| 退避 / 认证熔断 | 有 | 固定 60 秒重试 |
+| 界面消息语言 | 中/英（`PI_GLM_USAGE_LANG` 或 locale；状态栏语言中立） | 仅英文 |
+| Key 来源 | auth.json → 环境变量，冲突时警告 | 仅 auth.json 的 `zai` |
+| pi peer 依赖 | `@earendil-works/pi-coding-agent` | 改名前的旧包名 |
+| 随包发布测试 | 有 | 无 |
+
+若 incumbent 增加国内版支持，此表将更新或移除（两份语言版本同步更新）。
 
 ## 隐私
 
