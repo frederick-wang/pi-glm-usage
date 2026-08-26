@@ -14,6 +14,7 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Container, Text, matchesKey } from "@earendil-works/pi-tui";
 import * as nodeFs from "node:fs";
 import * as nodeOs from "node:os";
 import * as nodePath from "node:path";
@@ -348,7 +349,34 @@ export function createQuotaClient(provider: ProviderId, deps: QuotaClientDeps) {
 		state.consecutiveAuthFailures = 0;
 	}
 
-	return { fetchQuota, resetBreaker };
+	/**
+	 * Best-effort detail fetch (model-usage / tool-usage); null degrades the
+	 * report. Live-verified CN shape: data.modelSummaryList for models,
+	 * data.toolSummaryList for tools; both [{ name-ish, totalTokens-or-count }].
+	 */
+	async function fetchDetail(
+		kind: "model-usage" | "tool-usage",
+		key: string,
+		win: { startTime: string; endTime: string },
+	): Promise<{ items: unknown[] } | null> {
+		const url = `${cfg.baseUrl}/api/monitor/usage/${kind}?startTime=${encodeURIComponent(win.startTime)}&endTime=${encodeURIComponent(win.endTime)}`;
+		try {
+			const res = await deps.fetchImpl(url, {
+				headers: { Authorization: authorization(state.scheme, key), "Accept-Language": "en-US,en", "User-Agent": "pi-glm-usage/0.1.0" },
+				signal: AbortSignal.timeout(timeoutMs),
+			});
+			if (!res.ok) return null;
+			const body = (await res.json()) as { code?: unknown; data?: unknown };
+			if (body.code !== 200 || body.data === null || typeof body.data !== "object") return null;
+			const data = body.data as Record<string, unknown>;
+			const summary = kind === "model-usage" ? data["modelSummaryList"] : data["toolSummaryList"];
+			return Array.isArray(summary) ? { items: summary } : null;
+		} catch {
+			return null;
+		}
+	}
+
+	return { fetchQuota, fetchDetail, resetBreaker };
 }
 
 function parseRetryAfter(value: string | null): number {
@@ -426,12 +454,65 @@ export function evaluateAlerts(
 }
 
 // ---------------------------------------------------------------------------
+// Report building — S3 pure helpers (rendered in the overlay / --json).
+// ---------------------------------------------------------------------------
+
+const REPORT_SEGMENT_NAMES: Record<number, string> = { 3: "5h window", 6: "Weekly", 5: "MCP" };
+
+export interface ReportDetail {
+	models: unknown[] | null;
+	tools: unknown[] | null;
+}
+
+export function formatDetailItem(item: unknown): string {
+	if (item === null || typeof item !== "object") return JSON.stringify(item);
+	const o = item as Record<string, unknown>;
+	const label = [o["modelName"], o["modelCode"], o["toolName"], o["tool"], o["name"], o["client"]].find(
+		(v): v is string => typeof v === "string",
+	) ?? null;
+	const value = [o["totalTokens"], o["usage"], o["count"], o["value"]].find(
+		(v) => typeof v === "number" || typeof v === "string",
+	) ?? null;
+	if (label !== null && value !== null) return `${label}  ${String(value)}`;
+	return JSON.stringify(item);
+}
+
+export function buildReportText(snapshot: Snapshot, detail: ReportDetail, opts: { now: number }): string {
+	const lines: string[] = [];
+	lines.push(`GLM Coding Plan usage${snapshot.level ? ` — level: ${snapshot.level}` : ""}`);
+	for (const l of snapshot.limits) {
+		const name = REPORT_SEGMENT_NAMES[l.unit] ?? `unit ${l.unit}`;
+		const pct = l.percentage === null ? "unknown%" : `${l.percentage}% used`;
+		const reset = formatReset(l.nextResetTime, opts.now);
+		lines.push(`  ${name.padEnd(12)}${pct}${reset ? `   resets in ${reset}` : ""}`);
+	}
+	if (detail.models !== null || detail.tools !== null) {
+		if (detail.models !== null) {
+			lines.push("", "Model usage (last 24h, Asia/Shanghai window):");
+			for (const m of detail.models) lines.push(`  ${formatDetailItem(m)}`);
+		}
+		if (detail.tools !== null) {
+			lines.push("", "Tool usage (last 24h):");
+			for (const t of detail.tools) lines.push(`  ${formatDetailItem(t)}`);
+		}
+	} else {
+		lines.push("", "Detail endpoints unavailable for this provider.");
+	}
+	return lines.join("\n");
+}
+
+// ---------------------------------------------------------------------------
 // Extension assembly — S1 seam. All effects go through ctx.ui; every
 // degradation is a footer/notify state, never a thrown error.
 // ---------------------------------------------------------------------------
 
 export interface QuotaClientLike {
 	fetchQuota(key: string): Promise<QuotaResult>;
+	fetchDetail(
+		kind: "model-usage" | "tool-usage",
+		key: string,
+		win: { startTime: string; endTime: string },
+	): Promise<{ items: unknown[] } | null>;
 	resetBreaker(): void;
 }
 
@@ -624,6 +705,90 @@ export function createExtension(deps: ExtensionDeps) {
 					break;
 				}
 			}
+		});
+
+		async function showOverlay(text: string, ctx: { ui: UiLike & { custom(factory: unknown, opts?: unknown): Promise<unknown> } }): Promise<void> {
+			await ctx.ui.custom(
+				(_tui: unknown, theme: FooterTheme, _kb: unknown, done: (value: unknown) => void) => {
+					const container = new Container();
+					container.addChild(new Text(theme.fg("accent", "GLM Usage Report"), 1, 0));
+					container.addChild(new Text(text, 1, 1));
+					container.addChild(new Text(theme.fg("dim", "Press Enter or Esc to close"), 1, 0));
+					return {
+						render: (width: number) => container.render(width),
+						invalidate: () => container.invalidate(),
+						handleInput: (data: string) => {
+							if (matchesKey(data, "enter") || matchesKey(data, "escape")) done(undefined);
+						},
+					};
+				},
+				{ overlay: true },
+			);
+		}
+
+		pi.registerCommand("glm-usage", {
+			description: "Show GLM Coding Plan usage (add --json for raw output)",
+			handler: async (args: string, ctx: { mode?: string; ui: UiLike & { custom(factory: unknown, opts?: unknown): Promise<unknown> } }) => {
+				// Provider: active GLM provider, else the first provider with a resolvable key.
+				let provider: ProviderId | null = active;
+				let key: string | null = apiKey;
+				if (provider === null || key === null) {
+					for (const p of ["zai-coding-cn", "zai"] as ProviderId[]) {
+						const r = resolveKey(p, deps.keyDepsFor(p));
+						if (r.status === "ok" || r.status === "conflict") {
+							provider = p;
+							key = r.key;
+							break;
+						}
+					}
+				}
+				if (provider === null || key === null) {
+					ctx.ui.notify("pi-glm-usage: no API key found for any GLM provider.", "error");
+					return;
+				}
+				const client = deps.quotaClientFor(provider);
+				const res = await client.fetchQuota(key);
+				if (res.status !== "ok") {
+					ctx.ui.notify(
+						res.status === "retry"
+							? "pi-glm-usage: the usage endpoint is rate-limiting; retry shortly."
+							: (res as { message?: string }).message ?? "pi-glm-usage: usage fetch failed.",
+						"error",
+					);
+					return;
+				}
+				if (provider === active) {
+					snapshot = res.snapshot;
+					stale = false;
+					render(ctx.ui);
+				}
+				const win = shanghaiWindow(now());
+				const [models, tools] = await Promise.all([
+					client.fetchDetail("model-usage", key, win),
+					client.fetchDetail("tool-usage", key, win),
+				]);
+				const wantJson = args.includes("--json");
+				if (wantJson) {
+					const payload = JSON.stringify(
+						{ provider, quota: res.snapshot, window: win, detail: { models, tools } },
+						null,
+						2,
+					);
+					if (ctx.mode === "tui") {
+						await showOverlay(payload, ctx);
+					} else {
+						console.log(payload);
+					}
+					return;
+				}
+				const text = buildReportText(res.snapshot, { models: models?.items ?? null, tools: tools?.items ?? null }, { now: now() });
+				if (ctx.mode === "tui") {
+					await showOverlay(text, ctx);
+				} else {
+					const pct = res.snapshot.limits.find((l) => l.unit === 3)?.percentage;
+					ctx.ui.notify(`GLM 5h window: ${pct === null || pct === undefined ? "unknown" : `${pct}%`} used`, "info");
+				}
+			},
 		});
 
 		pi.on("session_start", async (_event, ctx) => {

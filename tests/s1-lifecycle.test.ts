@@ -49,6 +49,7 @@ function harness(opts: { queue?: QueueItem[]; tty?: boolean } = {}) {
 			cursor += 1;
 			return Promise.resolve(next);
 		},
+		fetchDetail: () => Promise.resolve(null),
 		resetBreaker: () => {},
 	});
 	const timers: Array<{ unrefed: boolean }> = [];
@@ -139,6 +140,7 @@ test("late response after provider switch is discarded (generation guard)", asyn
 				new Promise<QueueItem>((resolve) => {
 					releaseFetch = resolve;
 				}),
+			fetchDetail: () => Promise.resolve(null),
 			resetBreaker: () => {},
 		}),
 		nowFn: () => Date.UTC(2026, 7, 27, 4, 0, 0),
