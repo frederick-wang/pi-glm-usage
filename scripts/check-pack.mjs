@@ -10,8 +10,8 @@ const EXPECTED = ["LICENSE", "README.md", "extensions/glm-usage.ts", "package.js
 
 const out = execFileSync("pnpm", ["pack", "--dry-run", "--json"], { encoding: "utf8", stdio: ["ignore", "pipe", "inherit"] });
 // pnpm emits a single pack object; npm emits an array of them.
-const parsed: unknown = JSON.parse(out);
-const entries = Array.isArray(parsed) ? (parsed as Array<{ files: Array<{ path: string }> }>) : [parsed as { files: Array<{ path: string }> }];
+const parsed = JSON.parse(out);
+const entries = Array.isArray(parsed) ? parsed : [parsed];
 const files = entries.flatMap((entry) => entry.files.map((f) => f.path)).sort();
 const expected = [...EXPECTED].sort();
 
