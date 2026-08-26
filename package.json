@@ -1,0 +1,42 @@
+{
+  "name": "@zhaoji-wang/pi-glm-usage",
+  "version": "0.1.0",
+  "description": "GLM Coding Plan (China & Global) quota usage in the pi footer — status bar, threshold alerts, /glm-usage report. Unofficial, not affiliated with Zhipu/Z.ai.",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "glm",
+    "zhipu",
+    "zai",
+    "usage",
+    "quota"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/frederick-wang/pi-glm-usage.git"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "extensions"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "typescript": "^5"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test 'tests/*.test.ts'",
+    "live-check": "node scripts/live-check.ts"
+  }
+}
