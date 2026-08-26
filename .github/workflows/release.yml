@@ -24,5 +24,12 @@ jobs:
       - run: pnpm test
       - name: Verify tarball file list (gate)
         run: node scripts/check-pack.mjs
-      - name: Publish (OIDC trusted publishing; provenance automatic)
+      # npm's OIDC detection follows the setup-node pattern (registry-url
+      # present, no stray auth). pnpm/setup's environment made npm fall back
+      # to credential auth (ENEEDAUTH) on the first 0.1.1 attempt.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - name: Publish (OIDC trusted publishing)
         run: npm publish --access public
