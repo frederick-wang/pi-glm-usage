@@ -39,7 +39,7 @@ test("switching to a non-GLM provider clears the footer", async () => {
 	const pi = install({ env: { ZAI_CODING_CN_API_KEY: "k" } });
 	await selectModel(pi, CN);
 	const ui = await selectModel(pi, "anthropic");
-	assert.equal(ui.status.at(-1)?.text, "");
+	assert.equal(ui.status.at(-1)?.text, undefined);
 });
 
 test("no key: one warn notification, dim footer, no repeat on re-select", async () => {
