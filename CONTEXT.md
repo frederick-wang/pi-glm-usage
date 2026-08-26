@@ -9,11 +9,11 @@ A pi provider backed by a GLM Coding Plan subscription (`zai-coding-cn` for Chin
 _Avoid_: account, endpoint
 
 **Quota window**:
-The 5-hour rolling token allowance reported by the usage API as `TOKENS_LIMIT`.
+A rolling token allowance reported as `TOKENS_LIMIT`; unit 3 is the 5-hour window, unit 6 the weekly window. Both providers report both units.
 _Avoid_: rate limit, 5h limit
 
 **MCP quota**:
-The calendar-month usage allowance reported as `TIME_LIMIT` (unit 5); may be absent for plans without it.
+The usage allowance reported as `TIME_LIMIT` (unit 5), metered in calls (`usage`/`currentValue`/`remaining`); shared across both endpoints' subscription.
 _Avoid_: monthly limit
 
 **Weekly quota**:
