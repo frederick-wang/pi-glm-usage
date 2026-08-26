@@ -10,6 +10,7 @@
     "lib": ["ES2022"],
     "verbatimModuleSyntax": true,
     "allowImportingTsExtensions": true,
+    "erasableSyntaxOnly": true,
     "forceConsistentCasingInFileNames": true
   },
   "include": ["extensions", "tests", "scripts"]
