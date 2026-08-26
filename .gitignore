@@ -3,3 +3,7 @@ dist/
 *.tgz
 *.log
 .DS_Store
+# pi extension loader 编译产物
+extensions/*.js
+scripts/*.js
+tests/*.js
