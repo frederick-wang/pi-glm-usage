@@ -361,6 +361,71 @@ function parseRetryAfter(value: string | null): number {
 }
 
 // ---------------------------------------------------------------------------
+// Threshold alerts — S3 pure evaluator + S1 wiring.
+// Dedup key: (provider, unit). Window identity: nextResetTime within
+// ±15min (live-verified stable within a window). A drop of ≥20 points
+// re-arms both tiers. First observation above a tier emits the highest only.
+// ---------------------------------------------------------------------------
+
+export interface AlertUnitState {
+	anchor: number | null;
+	lastPct: number | null;
+	alerted80: boolean;
+	alerted95: boolean;
+}
+
+export type AlertState = Record<string, AlertUnitState>;
+
+export interface AlertEmission {
+	unit: number;
+	tier: 80 | 95;
+}
+
+const ALERT_TOLERANCE_MS = 15 * 60_000;
+const ALERT_DROP_REARM = 20;
+
+export function evaluateAlerts(
+	state: AlertState | null,
+	provider: ProviderId,
+	snapshot: Snapshot,
+): { emitted: AlertEmission[]; state: AlertState } {
+	const next: AlertState = { ...(state ?? {}) };
+	const emitted: AlertEmission[] = [];
+	for (const limit of snapshot.limits) {
+		if (limit.percentage === null) continue;
+		const pct = limit.percentage;
+		const key = `${provider}:${limit.unit}`;
+		const prev = next[key];
+		let anchor = prev?.anchor ?? null;
+		let alerted80 = prev?.alerted80 ?? false;
+		let alerted95 = prev?.alerted95 ?? false;
+		const cur = limit.nextResetTime;
+		if (anchor !== null && cur !== undefined && Math.abs(cur - anchor) > ALERT_TOLERANCE_MS) {
+			anchor = cur;
+			alerted80 = false;
+			alerted95 = false;
+		} else if (anchor === null && cur !== undefined) {
+			anchor = cur;
+		}
+		const lastPct = prev?.lastPct ?? null;
+		if (lastPct !== null && lastPct - pct >= ALERT_DROP_REARM) {
+			alerted80 = false;
+			alerted95 = false;
+		}
+		if (pct >= 95) {
+			if (!alerted95) emitted.push({ unit: limit.unit, tier: 95 });
+			alerted95 = true;
+			alerted80 = true;
+		} else if (pct >= 80) {
+			if (!alerted80) emitted.push({ unit: limit.unit, tier: 80 });
+			alerted80 = true;
+		}
+		next[key] = { anchor, lastPct: pct, alerted80, alerted95 };
+	}
+	return { emitted, state: next };
+}
+
+// ---------------------------------------------------------------------------
 // Extension assembly — S1 seam. All effects go through ctx.ui; every
 // degradation is a footer/notify state, never a thrown error.
 // ---------------------------------------------------------------------------
@@ -376,6 +441,11 @@ export interface UiLike {
 	theme: FooterTheme;
 }
 
+export interface AlertStore {
+	save(state: AlertState): void;
+	load(): AlertState | null;
+}
+
 export interface ExtensionDeps {
 	keyDepsFor(provider: ProviderId): KeyDeps;
 	quotaClientFor(provider: ProviderId): QuotaClientLike;
@@ -383,7 +453,10 @@ export interface ExtensionDeps {
 	tty?: boolean;
 	setInterval?: typeof setInterval;
 	clearInterval?: typeof clearInterval;
+	alertStore?: AlertStore;
 }
+
+const ALERT_ENTRY_TYPE = "pi-glm-usage-alerts";
 
 const THROTTLE_MS = 180_000;
 const THROTTLE_HIGH_USAGE_MS = 60_000;
@@ -412,6 +485,18 @@ export function createExtension(deps: ExtensionDeps) {
 		let timerRunning = false;
 		// Persistent UI handle for interval-driven re-renders (countdown ticks).
 		let lastUi: UiLike | null = null;
+		let alertState: AlertState | null = null;
+		const alertStore: AlertStore =
+			deps.alertStore ?? {
+				save: (s) => {
+					try {
+						(pi as { appendEntry?: (type: string, data: unknown) => void }).appendEntry?.(ALERT_ENTRY_TYPE, s);
+					} catch {
+						// Persistence is best-effort; per-session dedup still applies.
+					}
+				},
+				load: () => null,
+			};
 
 		const throttleMs = () =>
 			snapshot && snapshot.limits.some((l) => (l.unit === 3 || l.unit === 6) && (l.percentage ?? 0) >= 80)
@@ -453,6 +538,14 @@ export function createExtension(deps: ExtensionDeps) {
 					if (res.status === "ok") {
 						snapshot = res.snapshot;
 						stale = false;
+						const alerts = evaluateAlerts(alertState, active as ProviderId, res.snapshot);
+						alertState = alerts.state;
+						alertStore.save(alertState);
+						for (const e of alerts.emitted) {
+							const label = FOOTER_LABELS[e.unit] ?? `unit ${e.unit}`;
+							const pct = res.snapshot.limits.find((l) => l.unit === e.unit)?.percentage ?? "?";
+							ui.notify(`GLM ${label} quota at ${pct}% used (crossed ${e.tier}%)`, e.tier === 95 ? "error" : "warning");
+						}
 					} else if (res.status === "retry") {
 						lastFetchAt = now() + res.retryAfterMs;
 					} else if (snapshot !== null) {
@@ -534,6 +627,21 @@ export function createExtension(deps: ExtensionDeps) {
 		});
 
 		pi.on("session_start", async (_event, ctx) => {
+			// Restore alert dedup state from the session log (last entry wins).
+			try {
+				const entries = (ctx as { sessionManager?: { getEntries?: () => unknown[] } }).sessionManager?.getEntries?.() ?? [];
+				for (let i = entries.length - 1; i >= 0; i -= 1) {
+					const e = entries[i] as { type?: string; customType?: string; data?: unknown };
+					if (e.type === "custom" && e.customType === ALERT_ENTRY_TYPE && e.data && typeof e.data === "object") {
+						alertState = e.data as AlertState;
+						break;
+					}
+				}
+			} catch {
+				alertState = null;
+			}
+			const loaded = alertStore.load();
+			if (loaded) alertState = loaded;
 			if (active !== null && apiKey !== null) refresh(ctx, false);
 		});
 
