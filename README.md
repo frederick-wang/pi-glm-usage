@@ -8,35 +8,16 @@ English | [简体中文](./README.zh-CN.md)
 > stop working at any time.
 
 GLM Coding Plan (China & Global) quota usage in the
-[pi coding agent](https://github.com/earendil-works/pi-mono) footer — with
-threshold alerts and a detailed report command.
+[pi coding agent](https://github.com/earendil-works/pi-mono) footer,
+with threshold alerts and a report command.
 
 ```
 GLM 5h 34%↻1h40m·W 2%
 ```
 
-## What it does
-
-- **Footer status** while a GLM plan provider (`zai-coding-cn` or `zai`) is
-  active: 5-hour window and weekly quota as used percentages, countdown to the
-  nearest reset, threshold colors, and a `~` marker when the displayed value is
-  stale. Cleared automatically when you switch to another provider.
-- **Threshold alerts**: one toast at 80% and 95% per quota window and tier,
-  deduplicated by reset-window identity, re-armed by large usage drops, and
-  persisted across sessions.
-- **`/glm-usage`**: full report in an overlay — plan level, every quota segment
-  with reset times, and per-model / per-tool usage over the last 24 hours
-  (detail endpoints verified on the China plan; the report degrades to
-  quota-only where they are unavailable). `/glm-usage --json` prints the raw
-  merged payload.
-- **Polite client**: per-provider auth scheme (raw key for CN, Bearer for
-  global) with one 401 fallback, auth circuit breaker, 429/5xx backoff
-  honoring `Retry-After`, request timeouts, and stale-value fallback instead of
-  error spam. Headless (`pi -p`) runs perform no network requests.
-
 ## Install
 
-npm (recommended — indexed by the [package gallery](https://pi.dev/packages)):
+npm (indexed by the [package gallery](https://pi.dev/packages)):
 
 ```bash
 pi install npm:@zhaoji-wang/pi-glm-usage
@@ -47,6 +28,66 @@ Or from git:
 ```bash
 pi install git:github.com/frederick-wang/pi-glm-usage
 ```
+
+## Usage
+
+### Footer
+
+Appears when the active model's provider is `zai-coding-cn` or `zai`; cleared
+on switching to any other provider.
+
+```
+GLM 5h 34%↻2h 40m·W 2%
+```
+
+| Element | Meaning |
+| --- | --- |
+| `5h` / `W` / `M` | 5-hour rolling token window / weekly quota / MCP monthly quota; at most two segments are shown (5h first, then W or M) |
+| `34%` | used percentage of that window (integer, 0–100) |
+| `↻2h 40m` | time until the nearest displayed segment resets, recomputed locally every 30 s without network requests; weekday+time within 7 days (`↻Sat 05:00`), date beyond (`↻Sep06`) |
+| `~` | the displayed value is stale: the last refresh failed, the previous number is kept |
+| color | green < 50%, yellow 50–79%, red ≥ 80% |
+
+### Threshold alerts
+
+One toast per quota window per tier when usage crosses 80% or 95%:
+
+```
+GLM 5h quota at 85% used (crossed 80%)
+```
+
+Jitter around a threshold does not re-emit. A drop of 20 points or more
+re-arms the tier. Alert state survives restarts (stored in the session file).
+
+### `/glm-usage`
+
+Opens an overlay with every quota segment and per-model / per-tool usage over
+the last 24 hours (detail endpoints verified on the China plan; global
+degrades to quota-only):
+
+```
+GLM Coding Plan — max
+  5h window   34% used   resets in 2h 40m
+  Weekly      2% used   resets in Sat 05:00
+  MCP         1% used   resets in Sep06
+
+Model usage (last 24h):
+  GLM-5.3  31436935
+  GLM-4.7  296701
+
+Tool usage (last 24h):
+```
+
+`/glm-usage --json` prints the raw merged payload (quota snapshot, query
+window, detail arrays) instead of the overlay — TUI and print mode only.
+
+### Refresh behavior
+
+Fetches on activation and on `/glm-usage`; after each turn at most every
+180 s (60 s once any token window is ≥ 80%). 429/5xx backs off honoring
+`Retry-After`. Rejected credentials trip a breaker after two failed rounds
+and stop requesting until the next model switch or `/glm-usage`. Headless
+runs (`pi -p`) make no requests.
 
 ## Key setup
 
@@ -63,10 +104,8 @@ instead of silently reading a different account.
 
 ## Why another package
 
-An unscoped `pi-glm-usage` already exists on npm. This package exists because
-it covers the China plan (the incumbent hardcodes the global endpoint), gates
-on the active provider, and adds a report command, alerts, and backoff.
-Factual comparison, as of 2026-08-27 (this package 0.1.0, incumbent 0.1.2):
+An unscoped `pi-glm-usage` already exists on npm. Comparison as of
+2026-08-27 (this package 0.1.1, incumbent 0.1.2):
 
 | | @zhaoji-wang/pi-glm-usage | unscoped pi-glm-usage |
 | --- | --- | --- |
@@ -115,4 +154,4 @@ pnpm test
 pnpm run live-check  # resolves the real key and fetches one snapshot
 ```
 
-MIT license. Contributions welcome.
+MIT license (see [LICENSE](./LICENSE)).
