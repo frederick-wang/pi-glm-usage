@@ -1,7 +1,7 @@
 {
   "name": "@zhaoji-wang/pi-glm-usage",
   "version": "0.1.0",
-  "description": "GLM Coding Plan (China & Global) quota usage in the pi footer — status bar, threshold alerts, /glm-usage report. Unofficial, not affiliated with Zhipu/Z.ai.",
+  "description": "GLM Coding Plan (China & Global) quota usage in the pi footer \u2014 status bar, threshold alerts, /glm-usage report. Unofficial, not affiliated with Zhipu/Z.ai.",
   "type": "module",
   "license": "MIT",
   "keywords": [
@@ -28,11 +28,14 @@
     ]
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*"
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
   },
   "devDependencies": {
     "@types/node": "^22",
-    "typescript": "^5"
+    "typescript": "^5",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",

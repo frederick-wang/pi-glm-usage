@@ -60,6 +60,7 @@ function harness(opts: { queue?: Array<{ status: "ok"; snapshot: Snapshot }>; sa
 				cursor += 1;
 				return Promise.resolve(next);
 			},
+			fetchDetail: () => Promise.resolve(null),
 			resetBreaker: () => {},
 		}),
 		nowFn: () => now,
