@@ -20,7 +20,8 @@
     "node": ">=20"
   },
   "files": [
-    "extensions"
+    "extensions",
+    "README.zh-CN.md"
   ],
   "pi": {
     "extensions": [

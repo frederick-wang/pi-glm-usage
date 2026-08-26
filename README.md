@@ -1,5 +1,7 @@
 # pi-glm-usage
 
+English | [简体中文](./README.zh-CN.md)
+
 > **Unofficial.** Not affiliated with Zhipu AI / Z.ai. Reads the GLM Coding Plan
 > usage through monitor endpoints observed in Zhipu's official tooling; those
 > endpoints are undocumented and may change without notice. This package may
