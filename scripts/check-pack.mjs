@@ -6,7 +6,7 @@
  */
 import { execFileSync } from "node:child_process";
 
-const EXPECTED = ["LICENSE", "README.md", "extensions/glm-usage.ts", "package.json"];
+const EXPECTED = ["LICENSE", "README.md", "README.zh-CN.md", "extensions/glm-usage.ts", "package.json"];
 
 const out = execFileSync("pnpm", ["pack", "--dry-run", "--json"], { encoding: "utf8", stdio: ["ignore", "pipe", "inherit"] });
 // pnpm emits a single pack object; npm emits an array of them.
