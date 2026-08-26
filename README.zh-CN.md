@@ -102,10 +102,10 @@ auth.json 存在但无法解析时，给出明确错误，不会静默改用环�
 
 ## 为什么有这个包
 
-npm 上已存在同名的无 scope 包 `pi-glm-usage`。对比（截至 2026-08-27，
-本包 0.1.1，现有包 0.1.2）：
+npm 上还有一个同名的 [`pi-glm-usage`](https://www.npmjs.com/package/pi-glm-usage)
+（无 scope，另一作者维护）。对比（截至 2026-08-27，本包 0.1.1，`pi-glm-usage` 0.1.2）：
 
-| | @zhaoji-wang/pi-glm-usage | 无 scope 的 pi-glm-usage |
+| | @zhaoji-wang/pi-glm-usage | [pi-glm-usage](https://www.npmjs.com/package/pi-glm-usage) |
 | --- | --- | --- |
 | 国内版端点（open.bigmodel.cn） | 支持 | 不支持 |
 | 国际版端点（api.z.ai） | 支持 | 支持 |
@@ -118,7 +118,7 @@ npm 上已存在同名的无 scope 包 `pi-glm-usage`。对比（截至 2026-08-
 | pi peer 依赖 | `@earendil-works/pi-coding-agent` | 改名前的旧包名 |
 | 公开的单元测试 | 有 | 无 |
 
-若现有包增加国内版支持，此表将更新或移除。
+若 `pi-glm-usage` 增加国内版支持，此表将更新或移除。
 
 ## 隐私
 

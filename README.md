@@ -104,10 +104,11 @@ instead of silently reading a different account.
 
 ## Why another package
 
-An unscoped `pi-glm-usage` already exists on npm. Comparison as of
-2026-08-27 (this package 0.1.1, the unscoped package 0.1.2):
+A same-named [`pi-glm-usage`](https://www.npmjs.com/package/pi-glm-usage)
+by another author already exists on npm. Comparison as of 2026-08-27
+(this package 0.1.1, `pi-glm-usage` 0.1.2):
 
-| | @zhaoji-wang/pi-glm-usage | unscoped pi-glm-usage |
+| | @zhaoji-wang/pi-glm-usage | [pi-glm-usage](https://www.npmjs.com/package/pi-glm-usage) |
 | --- | --- | --- |
 | China endpoint (open.bigmodel.cn) | yes | no |
 | Global endpoint (api.z.ai) | yes | yes |
@@ -120,7 +121,7 @@ An unscoped `pi-glm-usage` already exists on npm. Comparison as of
 | pi peer dependency | `@earendil-works/pi-coding-agent` | pre-rename package name |
 | Published tests | yes | no |
 
-If the unscoped package adds China support, this table will be updated or removed.
+If `pi-glm-usage` adds China support, this table will be updated or removed.
 
 ## Language
 
