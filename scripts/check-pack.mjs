@@ -8,8 +8,11 @@ import { execFileSync } from "node:child_process";
 
 const EXPECTED = ["LICENSE", "README.md", "extensions/glm-usage.ts", "package.json"];
 
-const out = execFileSync("npm", ["pack", "--dry-run", "--json"], { encoding: "utf8", stdio: ["ignore", "pipe", "inherit"] });
-const files = JSON.parse(out).flatMap((entry) => entry.files.map((f) => f.path)).sort();
+const out = execFileSync("pnpm", ["pack", "--dry-run", "--json"], { encoding: "utf8", stdio: ["ignore", "pipe", "inherit"] });
+// pnpm emits a single pack object; npm emits an array of them.
+const parsed = JSON.parse(out);
+const entries = Array.isArray(parsed) ? parsed : [parsed];
+const files = entries.flatMap((entry) => entry.files.map((f) => f.path)).sort();
 const expected = [...EXPECTED].sort();
 
 const unexpected = files.filter((f) => !expected.includes(f));

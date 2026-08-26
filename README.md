@@ -96,11 +96,13 @@ leaves the machine. Alert dedup state is stored in the local pi session file.
 
 ## Development
 
+This repo uses pnpm (see `packageManager` in `package.json`). Node ≥ 23.6 for native TypeScript type stripping; CI runs Node 24.
+
 ```bash
-npm install
-npm run typecheck
-npm test            # Node ≥ 23.6 (type stripping); CI runs Node 24
-npm run live-check  # resolves the real key and fetches one snapshot
+pnpm install
+pnpm run typecheck
+pnpm test
+pnpm run live-check  # resolves the real key and fetches one snapshot
 ```
 
 MIT license. Contributions welcome.
