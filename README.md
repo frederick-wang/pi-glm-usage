@@ -37,11 +37,12 @@ Appears when the active model's provider is `zai-coding-cn` or `zai`; cleared
 on switching to any other provider.
 
 ```
-GLM 5h 34%↻2h 40m·W 2%
+GLM 5h ███░░░░░ 34%↻2h 40m·W ░░░░░░░░ 2%
 ```
 
 | Element | Meaning |
 | --- | --- |
+| `███░░░░░` | 8-cell usage bar for that segment; filled cells take the threshold color, empty cells are dim |
 | `5h` / `W` / `M` | 5-hour rolling token window / weekly quota / MCP monthly quota; at most two segments are shown (5h first, then W or M) |
 | `34%` | used percentage of that window (integer, 0–100) |
 | `↻2h 40m` | time until the nearest displayed segment resets, recomputed locally every 30 s without network requests; weekday+time within 7 days (`↻Sat 05:00`), date beyond (`↻Sep06`) |
