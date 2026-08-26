@@ -202,8 +202,164 @@ export function createExtension(deps: ExtensionDeps) {
 }
 
 // ---------------------------------------------------------------------------
-// Default export — real filesystem/environment wiring.
+// Quota snapshot — parse + range guards (S3 pure helpers).
 // ---------------------------------------------------------------------------
+
+export interface QuotaLimit {
+	/** Monitor API unit code: 3 = 5h window, 5 = MCP, 6 = weekly; unknown codes are carried generically. */
+	unit: number;
+	/** Raw limit type string, e.g. "TOKENS_LIMIT" / "TIME_LIMIT". */
+	type: string;
+	/** Used percentage, integer 0–100; null when out of range or non-numeric. */
+	percentage: number | null;
+	/** Epoch-ms reset time when present and positive. */
+	nextResetTime: number | undefined;
+}
+
+export interface Snapshot {
+	level: string | undefined;
+	limits: QuotaLimit[];
+}
+
+export function parseQuotaResponse(raw: unknown): Snapshot | null {
+	if (raw === null || typeof raw !== "object") return null;
+	const envelope = raw as { code?: unknown; data?: unknown };
+	if (envelope.code !== 200) return null;
+	const data = envelope.data;
+	if (data === null || typeof data !== "object") return null;
+	const limitsRaw = (data as { limits?: unknown }).limits;
+	if (!Array.isArray(limitsRaw)) return null;
+	const limits: QuotaLimit[] = [];
+	for (const item of limitsRaw) {
+		if (item === null || typeof item !== "object") continue;
+		const entry = item as Record<string, unknown>;
+		const unit = entry["unit"];
+		const type = entry["type"];
+		if (typeof unit !== "number" || !Number.isInteger(unit) || typeof type !== "string") continue;
+		if (limits.some((l) => l.unit === unit)) continue;
+		const pctRaw = entry["percentage"];
+		const percentage =
+			typeof pctRaw === "number" && Number.isInteger(pctRaw) && pctRaw >= 0 && pctRaw <= 100 ? pctRaw : null;
+		const resetRaw = entry["nextResetTime"];
+		const nextResetTime =
+			typeof resetRaw === "number" && Number.isFinite(resetRaw) && resetRaw > 0 ? resetRaw : undefined;
+		limits.push({ unit, type, percentage, nextResetTime });
+	}
+	const levelRaw = (data as { level?: unknown }).level;
+	return { level: typeof levelRaw === "string" ? levelRaw : undefined, limits };
+}
+
+// ---------------------------------------------------------------------------
+// Quota client — the only module that talks to the monitor endpoints (S2).
+// ---------------------------------------------------------------------------
+
+export const ERR_AUTH = "pi-glm-usage: the usage endpoint rejected the API key";
+export const ERR_PARSE = "pi-glm-usage: unexpected response from the usage endpoint";
+export const ERR_TIMEOUT = "pi-glm-usage: the usage endpoint timed out";
+
+export type QuotaResult =
+	| { status: "ok"; snapshot: Snapshot }
+	| { status: "retry"; retryAfterMs: number }
+	| { status: "error"; message: string };
+
+export interface QuotaClientDeps {
+	fetchImpl: typeof fetch;
+	/** Request timeout; default 4000 ms. */
+	timeoutMs?: number;
+}
+
+interface SchemeState {
+	/** Preferred scheme failed once and the other one worked. */
+	scheme: "raw" | "bearer";
+	/** Consecutive rejections on both schemes. */
+	consecutiveAuthFailures: number;
+	/** Breaker open: refuse further requests until resetBreaker(). */
+	breakerOpen: boolean;
+}
+
+export function createQuotaClient(provider: ProviderId, deps: QuotaClientDeps) {
+	const cfg = PROVIDERS[provider];
+	const timeoutMs = deps.timeoutMs ?? 4000;
+	const state: SchemeState = { scheme: cfg.preferredScheme, consecutiveAuthFailures: 0, breakerOpen: false };
+
+	const authorization = (scheme: "raw" | "bearer", key: string) =>
+		scheme === "raw" ? key : `Bearer ${key}`;
+
+	async function attempt(key: string, scheme: "raw" | "bearer"): Promise<Response> {
+		return deps.fetchImpl(`${cfg.baseUrl}/api/monitor/usage/quota/limit`, {
+			headers: {
+				Authorization: authorization(scheme, key),
+				"Accept-Language": "en-US,en",
+				"Content-Type": "application/json",
+				"User-Agent": "pi-glm-usage/0.1.0",
+			},
+			signal: AbortSignal.timeout(timeoutMs),
+		});
+	}
+
+	function other(scheme: "raw" | "bearer"): "raw" | "bearer" {
+		return scheme === "raw" ? "bearer" : "raw";
+	}
+
+	async function fetchQuota(key: string): Promise<QuotaResult> {
+		if (state.breakerOpen) return { status: "error", message: ERR_AUTH };
+		let res: Response;
+		try {
+			res = await attempt(key, state.scheme);
+		} catch (err) {
+			const name = err instanceof Error ? err.name : "";
+			return name === "TimeoutError" || name === "AbortError"
+				? { status: "error", message: ERR_TIMEOUT }
+				: { status: "error", message: ERR_PARSE };
+		}
+		if (res.status === 401) {
+			let fallback: Response;
+			try {
+				fallback = await attempt(key, other(state.scheme));
+			} catch {
+				return { status: "error", message: ERR_TIMEOUT };
+			}
+			if (fallback.status === 401) {
+				state.consecutiveAuthFailures += 1;
+			if (state.consecutiveAuthFailures >= 2) state.breakerOpen = true;
+				return { status: "error", message: ERR_AUTH };
+			}
+			state.scheme = other(state.scheme);
+			state.consecutiveAuthFailures = 0;
+			res = fallback;
+		} else if (res.status === 429 || res.status >= 500) {
+			const retryAfterMs = parseRetryAfter(res.headers.get("retry-after"));
+			return { status: "retry", retryAfterMs };
+		}
+		let body: unknown;
+		try {
+			body = await res.json();
+		} catch {
+			return { status: "error", message: ERR_PARSE };
+		}
+		// Any 2xx carries the envelope; parseQuotaResponse validates the shape.
+		const snapshot = parseQuotaResponse(body);
+		if (!snapshot) return { status: "error", message: ERR_PARSE };
+		state.consecutiveAuthFailures = 0;
+		return { status: "ok", snapshot };
+	}
+
+	function resetBreaker(): void {
+		state.breakerOpen = false;
+		state.consecutiveAuthFailures = 0;
+	}
+
+	return { fetchQuota, resetBreaker };
+}
+
+function parseRetryAfter(value: string | null): number {
+	if (value === null) return 60_000;
+	const seconds = Number(value);
+	if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+	const date = Date.parse(value);
+	if (!Number.isNaN(date)) return Math.max(0, date - Date.now());
+	return 60_000;
+}
 
 export default function glmUsage(pi: ExtensionAPI): void {
 	const homedir = nodeOs.homedir();
