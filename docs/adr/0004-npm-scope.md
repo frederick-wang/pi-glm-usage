@@ -1,0 +1,3 @@
+# 0004 — Publish under the maintainer's npm org scope
+
+The unscoped npm name `pi-glm-usage` is held by a live third-party package, the preferred short org name was taken, and underscore-scoped publishing under the author's npm username could not be verified against registry policy without a publish-day gamble. We publish as `@zhaoji-wang/pi-glm-usage` under a free org owned by the maintainer's long-standing npm account. The identity split (GitHub repo owner vs npm org) is stitched by three links: the `package.json` `repository` field, npm provenance attestation on publish, and cross-links in README. Git-based `pi install` distribution is unaffected by any of this.

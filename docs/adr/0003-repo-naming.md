@@ -1,0 +1,3 @@
+# 0003 — Repo named `pi-glm-usage`, no username prefix
+
+The GitHub account is the namespace: every surveyed pi extension repo (`huggingface/pi-llama`, `tianrendong/pi-chrome`, `rchern/pi-claude-cli`, …) uses plain `pi-<feature>` naming with no username prefix, and the pi package gallery discovers via the `pi-package` keyword, not the author name. We follow the ecosystem convention: repo `pi-glm-usage` under the author's account. Authorship is carried by the repo URL and README. If the package is later published to npm and the unscoped name is taken (unscoped names cannot be reserved while unpublished), fall back to a scoped npm name and keep the repo name unchanged — git-based `pi install` distribution is unaffected either way.
