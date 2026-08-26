@@ -20,23 +20,23 @@ const markerTheme = { fg: (role: string, text: string) => `${role}(${text})` };
 
 test("footer: all units present → 5h then W, M omitted (two-segment cap)", () => {
 	const text = renderFooter(snap([[3, 34, NOW + 2 * HOUR], [6, 12, NOW + 48 * HOUR], [5, 1]]), { now: NOW, theme: identityTheme });
-	assert.equal(text, "GLM 5h ███░░░░░ 34%↻2h 0m·W █░░░░░░░ 12%");
+	assert.equal(text, "GLM 5h ███░░░░░ 34% ↻2h 0m · W █░░░░░░░ 12%");
 });
 
 test("footer: no weekly unit → MCP takes the second slot", () => {
 	const text = renderFooter(snap([[3, 6, NOW + HOUR], [5, 12]]), { now: NOW, theme: identityTheme });
-	assert.equal(text, "GLM 5h ░░░░░░░░ 6%↻1h 0m·M █░░░░░░░ 12%");
+	assert.equal(text, "GLM 5h ░░░░░░░░ 6% ↻1h 0m · M █░░░░░░░ 12%");
 });
 
 test("footer: reset suffix only on the nearest-resetting displayed segment", () => {
 	// W resets sooner than 5h here → ↻ lands on W
 	const text = renderFooter(snap([[3, 34, NOW + 6 * HOUR], [6, 12, NOW + 2 * HOUR]]), { now: NOW, theme: identityTheme });
-	assert.equal(text, "GLM 5h ███░░░░░ 34%·W █░░░░░░░ 12%↻2h 0m");
+	assert.equal(text, "GLM 5h ███░░░░░ 34% · W █░░░░░░░ 12% ↻2h 0m");
 });
 
 test("footer: missing reset times → no ↻ anywhere", () => {
 	const text = renderFooter(snap([[3, 34], [6, 12]]), { now: NOW, theme: identityTheme });
-	assert.equal(text, "GLM 5h ███░░░░░ 34%·W █░░░░░░░ 12%");
+	assert.equal(text, "GLM 5h ███░░░░░ 34% · W █░░░░░░░ 12%");
 });
 
 test("footer: unknown units dropped, known kept", () => {
@@ -46,7 +46,7 @@ test("footer: unknown units dropped, known kept", () => {
 
 test("footer: guard-null percentage renders ? and does not color by threshold", () => {
 	const text = renderFooter(snap([[3, null], [6, 12]]), { now: NOW, theme: identityTheme });
-	assert.equal(text, "GLM 5h ░░░░░░░░ ?%·W █░░░░░░░ 12%");
+	assert.equal(text, "GLM 5h ░░░░░░░░ ?% · W █░░░░░░░ 12%");
 });
 
 test("footer: stale marker appends ~ to the first percentage", () => {

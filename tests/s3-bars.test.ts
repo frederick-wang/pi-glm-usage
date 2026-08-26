@@ -39,8 +39,8 @@ test("renderBar: null percentage renders empty bar in dim", () => {
 
 test("footer: bar precedes the percentage on each segment", () => {
 	const text = renderFooter(snap([[3, 34, NOW + 2 * HOUR], [6, 12, NOW + 48 * HOUR]]), { now: NOW, theme: identityTheme });
-	// GLM 5h ██…░ 34%↻…·W … 12%
-	assert.match(text, /GLM 5h ██{1,7}░{1,7} 34%(↻[^·]*)?·W /);
+	// GLM 5h ██…░ 34% ↻… · W … 12%
+	assert.match(text, /GLM 5h ██{1,7}░{1,7} 34%( ↻[^·]*)? · W /);
 });
 
 test("footer: stale marker still appends to the percentage", () => {

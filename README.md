@@ -37,7 +37,7 @@ Appears when the active model's provider is `zai-coding-cn` or `zai`; cleared
 on switching to any other provider.
 
 ```
-GLM 5h ███░░░░░ 34%↻2h 40m·W ░░░░░░░░ 2%
+GLM 5h ███░░░░░ 34% ↻2h 40m · W ░░░░░░░░ 2%
 ```
 
 | Element | Meaning |
