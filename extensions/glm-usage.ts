@@ -262,9 +262,9 @@ export function renderFooter(snapshot: Snapshot, opts: { now: number; stale?: bo
 		const chunk = `${FOOTER_LABELS[p.unit]} ${renderBar(p.limit.percentage, opts.theme ?? identityTheme)} ${pctText}%${staleSuffix}`;
 		const colored = opts.theme ? opts.theme.fg(colorRoleFor(p.limit.percentage), chunk) : chunk;
 		const reset = nearest && nearest.unit === p.unit ? formatReset(p.limit.nextResetTime, opts.now) : "";
-		return reset ? `${colored}↻${reset}` : colored;
+		return reset ? `${colored} ↻${reset}` : colored;
 	});
-	return `GLM ${segs.join("·")}`;
+	return `GLM ${segs.join(" · ")}`;
 }
 
 const shanghaiFormatter = new Intl.DateTimeFormat("en-CA", {
