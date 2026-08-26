@@ -142,4 +142,6 @@ pnpm test
 pnpm run live-check  # 读取本机密钥并请求一次真实用量
 ```
 
-MIT 许可证（见 [LICENSE](./LICENSE)）。
+## 许可
+
+MIT 许可证，全文见 [LICENSE](./LICENSE)。

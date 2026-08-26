@@ -105,7 +105,7 @@ instead of silently reading a different account.
 ## Why another package
 
 An unscoped `pi-glm-usage` already exists on npm. Comparison as of
-2026-08-27 (this package 0.1.1, incumbent 0.1.2):
+2026-08-27 (this package 0.1.1, the unscoped package 0.1.2):
 
 | | @zhaoji-wang/pi-glm-usage | unscoped pi-glm-usage |
 | --- | --- | --- |
@@ -120,7 +120,7 @@ An unscoped `pi-glm-usage` already exists on npm. Comparison as of
 | pi peer dependency | `@earendil-works/pi-coding-agent` | pre-rename package name |
 | Published tests | yes | no |
 
-If the incumbent adds China support, this table will be updated or removed.
+If the unscoped package adds China support, this table will be updated or removed.
 
 ## Language
 
@@ -154,4 +154,6 @@ pnpm test
 pnpm run live-check  # resolves the real key and fetches one snapshot
 ```
 
-MIT license (see [LICENSE](./LICENSE)).
+## License
+
+MIT — see [LICENSE](./LICENSE).
