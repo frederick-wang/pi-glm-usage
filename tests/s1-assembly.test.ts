@@ -6,7 +6,7 @@ import { createExtension, STATUS_KEY } from "../extensions/glm-usage.ts";
 const CN = "zai-coding-cn";
 const GLOBAL = "zai";
 
-const okStub = () => ({ fetchQuota: () => new Promise<never>(() => {}), resetBreaker: () => {} });
+const okStub = () => ({ fetchQuota: () => new Promise<never>(() => {}), fetchDetail: () => Promise.resolve(null), resetBreaker: () => {} });
 function install(depsOpts: Parameters<typeof makeKeyDeps>[0]) {
 	const pi = fakePi();
 	const installFn = createExtension({ keyDepsFor: () => makeKeyDeps(depsOpts), quotaClientFor: okStub });

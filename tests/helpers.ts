@@ -28,15 +28,28 @@ export function fakeCtx(): { ctx: Record<string, unknown>; ui: UiCalls } {
 }
 
 /** Captures registered event handlers; tests emit events in host order. */
+export interface RegisteredCommand {
+	description: string;
+	handler: (args: string, ctx: unknown) => Promise<void> | void;
+}
+
 export function fakePi() {
 	const handlers: Record<string, Array<(event: unknown, ctx: unknown) => unknown>> = {};
+	const commands: Record<string, RegisteredCommand> = {};
 	return {
 		handlers,
+		commands,
 		on(event: string, fn: (event: unknown, ctx: unknown) => unknown) {
 			(handlers[event] ??= []).push(fn);
 		},
+		registerCommand(name: string, options: RegisteredCommand) {
+			commands[name] = options;
+		},
 		async emit(event: string, payload: unknown, ctx: unknown) {
 			for (const fn of handlers[event] ?? []) await fn(payload, ctx);
+		},
+		async runCommand(name: string, args: string, ctx: unknown) {
+			await commands[name]?.handler(args, ctx);
 		},
 		registeredEvents(): string[] {
 			return Object.keys(handlers);
