@@ -7,3 +7,4 @@ dist/
 extensions/*.js
 scripts/*.js
 tests/*.js
+=
