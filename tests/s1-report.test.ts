@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { fakePi, makeKeyDeps } from "./helpers.ts";
+import { fakePi, makeKeyDeps, stubKb } from "./helpers.ts";
 import { createExtension, type Snapshot } from "../extensions/glm-usage.ts";
 
 const CN = "zai-coding-cn";
@@ -18,10 +18,19 @@ interface Log {
 	status: Array<{ key: string; text: string }>;
 	notifications: Array<{ message: string; level: string }>;
 	customCalls: Array<unknown>;
+	overlay: OverlayArtifact | null;
 }
 
-function freshCtx(mode: "tui" | "rpc" | "print" = "tui") {
-	const log: Log = { status: [], notifications: [], customCalls: [] };
+export interface OverlayArtifact {
+	component: { render(width: number): string[]; invalidate(): void; handleInput(data: string): void } | null;
+	options: { overlay?: boolean; overlayOptions?: { maxHeight?: number | string } } | null;
+	doneCalls: number;
+	rows: number;
+}
+
+
+export function freshCtx(mode: "tui" | "rpc" | "print" = "tui") {
+	const log: Log = { status: [], notifications: [], customCalls: [], overlay: null };
 	return {
 		log,
 		ctx: {
@@ -34,8 +43,24 @@ function freshCtx(mode: "tui" | "rpc" | "print" = "tui") {
 					log.notifications.push({ message, level });
 				},
 				theme: identityTheme,
-				custom: async (factory: unknown) => {
+				custom: async (
+					factory: (tui: unknown, theme: unknown, kb: unknown, done: (value: unknown) => void) => unknown,
+					options?: { overlay?: boolean; overlayOptions?: { maxHeight?: number | string } },
+				) => {
 					log.customCalls.push(factory);
+					const artifact: OverlayArtifact = {
+						component: null,
+						options: options ?? null,
+						doneCalls: 0,
+						rows: 24,
+					};
+					log.overlay = artifact;
+					const done = (value: unknown) => {
+						void value;
+						artifact.doneCalls += 1;
+					};
+					const component = factory({ terminal: { rows: artifact.rows } }, identityTheme, stubKb(), done) as OverlayArtifact["component"];
+					artifact.component = component;
 					return undefined;
 				},
 			},
@@ -149,18 +174,18 @@ test("--json in print mode prints JSON to the console", async () => {
 
 test("overlay content includes quota and closes on Enter/Esc", async () => {
 	const h = harness();
-	let component: { handleInput: (data: string) => void } | null = null;
-	const { ctx } = freshCtx();
-	(ctx as { ui: { custom: unknown } }).ui.custom = async (
-		factory: (tui: unknown, theme: unknown, kb: unknown, done: (v: unknown) => void) => unknown,
-	) => {
-		const comp = factory({}, identityTheme, {}, () => {});
-		component = comp as { handleInput: (data: string) => void };
-		return undefined;
-	};
+	const { ctx, log } = freshCtx();
 	await h.pi.runCommand("glm-usage", "", ctx);
 	await settle();
-	assert.ok(component, "component returned from factory");
-	// Enter should invoke done without throwing.
-	assert.doesNotThrow(() => component?.handleInput("\r"));
+	const comp = log.overlay?.component;
+	assert.ok(comp, "component returned from factory");
+	// Enter and Esc close (legacy + Kitty encodings); no double resolve.
+	const before = log.overlay?.doneCalls ?? 0;
+	comp?.handleInput("\r");
+	comp?.handleInput("\x1b");
+	comp?.handleInput("\x1b[27u");
+	assert.equal(log.overlay?.doneCalls, before + 1, "resolved once");
+	// Rendered lines carry the quota content.
+	const out = comp!.render(60);
+	assert.ok(out.some((l) => /% used|已用|43/.test(l)), `quota content: ${JSON.stringify(out)}`);
 });

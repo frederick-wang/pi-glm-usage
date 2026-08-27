@@ -26,8 +26,8 @@ test("resolveLang: invalid explicit value falls through to locale detection", ()
 });
 
 test("msg: en and zh keys render; missing key falls back to en then key name", () => {
-	assert.equal(msg("en", "pressClose"), "Press Enter or Esc to close");
-	assert.equal(msg("zh", "pressClose"), "按 Enter 或 Esc 关闭");
+	assert.equal(msg("en", "pressClose"), "Press Enter, Esc, or Ctrl+C to close");
+	assert.equal(msg("zh", "pressClose"), "按 Enter、Esc 或 Ctrl+C 关闭");
 	assert.equal(msg("zh", "nonexistent", {}), "nonexistent");
 });
 
