@@ -87,3 +87,32 @@ export function fakeFetch(
 	};
 	return { fetch: fn as typeof fetch, requests };
 }
+
+/** Stub KeybindingsManager: legacy bytes + Kitty CSI-u for the keys we bind. */
+export function stubKb(): { matches(data: string, id: string): boolean } {
+	const confirm = new Set(["\r", "\n", "\x1b[13u", "\x1bOM"]);
+	const cancel = new Set(["\x1b", "\x1b[27u", "\x03", "\x1b[99;5u"]);
+	const up = new Set(["\x1b[A", "\x1bOA"]);
+	const down = new Set(["\x1b[B", "\x1bOB"]);
+	const pageUp = new Set(["\x1b[5~"]);
+	const pageDown = new Set(["\x1b[6~"]);
+	const home = new Set(["\x1b[H", "\x1b[1~", "\x1bOH"]);
+	const end = new Set(["\x1b[F", "\x1b[4~", "\x1bOF"]);
+	return {
+		matches(data: string, id: string) {
+			switch (id) {
+				case "tui.select.confirm": return confirm.has(data);
+				case "tui.select.cancel": return cancel.has(data);
+				case "tui.select.up": return up.has(data);
+				case "tui.select.down": return down.has(data);
+				case "tui.select.pageUp": return pageUp.has(data);
+				case "tui.select.pageDown": return pageDown.has(data);
+				case "tui.altScreen.pageUp": return pageUp.has(data);
+				case "tui.altScreen.pageDown": return pageDown.has(data);
+				case "tui.altScreen.top": return home.has(data);
+				case "tui.altScreen.bottom": return end.has(data);
+				default: return false;
+			}
+		},
+	};
+}

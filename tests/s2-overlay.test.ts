@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { fakePi, makeKeyDeps } from "./helpers.ts";
-import { freshCtx, stubKb } from "./s1-report.test.ts";
+import { fakePi, makeKeyDeps, stubKb } from "./helpers.ts";
 import { createExtension, type Snapshot, visualWidth, wrapLines, windowSlice, clampScrollTop, createOverlayComponent } from "../extensions/glm-usage.ts";
 
 const CN = "zai-coding-cn";
@@ -118,9 +117,9 @@ test("createOverlayComponent: overflow shows status and scrolls; footer always v
 test("createOverlayComponent: height budget closed at any rows/width", () => {
 	const kb = stubKb();
 	const body = Array.from({ length: 60 }, (_, i) => `row ${i} 余额 long`);
-	for (const rows of [8, 12, 24, 40]) {
+	for (const rows of [5, 6, 8, 12, 24, 40]) {
 		const budget = Math.max(1, Math.floor(rows * 0.8));
-		for (const width of [80, 40, 20, 10]) {
+		for (const width of [80, 40, 20, 10, 6]) {
 			const c = createOverlayComponent({
 				header: "GLM 用量报告", body, footer: "Esc 关闭",
 				theme: { fg: (_r: string, t: string) => t },
@@ -131,6 +130,56 @@ test("createOverlayComponent: height budget closed at any rows/width", () => {
 			for (const l of out) assert.ok(visualWidth(l) <= width, `row ${JSON.stringify(l)} > ${width}`);
 		}
 	}
+});
+
+test("createOverlayComponent: exact row width in boxed mode at 60/30/10", () => {
+	const kb = stubKb();
+	const body = ["GLM Coding Plan — max", "  5h window   43% used"];
+	for (const width of [60, 30, 10]) {
+		const c = createOverlayComponent({
+			header: "GLM 用量报告", body, footer: "Esc 关闭",
+			theme: { fg: (_r: string, t: string) => t },
+			kb, done: () => {}, rowGen: () => 24, lang: "zh",
+		});
+		const out = c.render(width);
+		if (width >= 8) {
+			for (const l of out) assert.equal(visualWidth(l), width, `width ${width}: ${JSON.stringify(l)}`);
+		} else {
+			for (const l of out) assert.ok(visualWidth(l) <= width);
+		}
+	}
+});
+
+test("createOverlayComponent: every scroll key ID moves the window", () => {
+	const kb = stubKb();
+	const body = Array.from({ length: 30 }, (_, i) => `row ${i}`);
+	const c = createOverlayComponent({
+		header: "T", body, footer: "Esc 关闭",
+		theme: { fg: (_r: string, t: string) => t },
+		kb, done: () => {}, rowGen: () => 24, lang: "zh",
+	});
+	const win = () => c.render(60).filter((l) => /^│.*│$/.test(l) && /\S/.test(l.slice(1, -1)) && !/(lines|行) ·/.test(l) && !/close|关闭/.test(l));
+	const top = win();
+	// Down / pageDown / end move from the top.
+	for (const key of [["\x1b[B", "down"], ["\x1b[6~", "pageDown"], ["\x1b[F", "end"]]) {
+		c.handleInput("\x1b[H");
+		c.handleInput(key[0]);
+		assert.notDeepEqual(win(), top, `${key[1]} moved the window`);
+	}
+	// Up returns one row; pageUp backs a page — measure from mid-window.
+	c.handleInput("\x1b[H");
+	const t2 = win();
+	c.handleInput("\x1b[B");
+	c.handleInput("\x1b[A");
+	assert.deepEqual(win(), t2, "up returns exactly one row");
+	c.handleInput("\x1b[6~"); // pageDown from top-ish
+	const mid = win();
+	c.handleInput("\x1b[5~"); // pageUp back
+	assert.notDeepEqual(win(), mid, "pageUp moved back");
+	// Home returns to the top from anywhere.
+	c.handleInput("\x1b[F");
+	c.handleInput("\x1b[H");
+	assert.deepEqual(win(), top, "home returns to top");
 });
 
 // ---------------------------------------------------------------------------
@@ -156,15 +205,26 @@ function harness() {
 
 test("integration: /glm-usage renders a bordered string[] overlay with 80% maxHeight", async () => {
 	const pi = harness();
-	const { ctx, log } = freshCtx();
+	const artifact = { component: null as { render(w: number): string[] } | null, options: null as { overlay?: boolean; overlayOptions?: { maxHeight?: number | string } } | null, doneCalls: 0, rows: 24 };
+	const ctx = {
+		mode: "tui",
+		ui: {
+			setStatus: () => {},
+			notify: () => {},
+			theme: { fg: (_r: string, t: string) => t },
+			custom: async (factory: (tui: unknown, theme: unknown, kb: unknown, done: (v: unknown) => void) => unknown, options?: { overlay?: boolean; overlayOptions?: { maxHeight?: number | string } }) => {
+				artifact.options = options ?? null;
+				artifact.component = factory({ terminal: { rows: 24 } }, { fg: (_r: string, t: string) => t }, stubKb(), () => {}) as { render(w: number): string[] };
+				return undefined;
+			},
+		},
+	};
 	await pi.runCommand("glm-usage", "", ctx);
 	await settle();
-	const comp = log.overlay?.component;
-	assert.ok(comp, "component captured");
-	const out = comp!.render(60);
+	assert.ok(artifact.component, "component captured");
+	const out = artifact.component!.render(60);
 	assert.ok(Array.isArray(out), "array");
 	assert.match(out[0]!, /^╭/, "boxed");
-	const opts = log.overlay?.options;
-	assert.equal(opts?.overlay, true);
-	assert.equal(opts?.overlayOptions?.maxHeight, "80%");
+	assert.equal(artifact.options?.overlay, true);
+	assert.equal(artifact.options?.overlayOptions?.maxHeight, "80%");
 });

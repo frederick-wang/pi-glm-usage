@@ -942,8 +942,9 @@ export function createOverlayComponent(opts: OverlayComponentOpts): OverlayCompo
 		// (or tiny terminals) degrade to borderless plain rows.
 		const boxed = maxRows >= 6 && width >= 8;
 		// Boxed: borders(2) + title blank(1) + footer blank(1) + footer row(1) = 5.
-		// Borderless (tiny): header(1) + blank(1) + blank(1) + footer(1) = 4.
-		const chrome = boxed ? 5 : 4;
+		// Borderless (tiny): header(1) + blank(1) + footer(1) = 3 — body gets
+		// whatever is left so content isn't dropped on short terminals.
+		const chrome = boxed ? 5 : 3;
 		const avail = Math.max(0, maxRows - chrome);
 		const canStatus = boxed && maxRows >= chrome + 2 + 1;
 		return { avail, canStatus, boxed };
@@ -993,7 +994,7 @@ export function createOverlayComponent(opts: OverlayComponentOpts): OverlayCompo
 			const out: string[] = [titleRow];
 			if (win.lines.length > 0) out.push("", ...win.lines);
 			if (statusRow) out.push("", statusRow);
-			out.push("", footerRow);
+			out.push(footerRow);
 			return out;
 		}
 
