@@ -85,7 +85,9 @@ const MESSAGES: Record<Lang, Record<string, (v: MsgVars) => string>> = {
 		modelUsage: () => "Model usage (last 24h):",
 		toolUsage: () => "Tool usage (last 24h):",
 		detailUnavailable: () => "Detail endpoints unavailable for this provider.",
-		pressClose: () => "Press Enter or Esc to close",
+		pressClose: () => "Press Enter, Esc, or Ctrl+C to close",
+		pressCloseShort: () => "Esc to close",
+		scrollStatus: (v) => `${v.pos}/${v.total} lines · ↑↓ scroll · Enter closes`,
 		alertCrossed: (v) => `GLM ${v.label} quota at ${v.pct}% used (crossed ${v.tier}%)`,
 		noKey: (v) => `pi-glm-usage: no API key for ${v.provider}. Add "${v.key}" to auth.json or set ${v.envVar}.`,
 		malformed: () => "pi-glm-usage: auth.json is not valid JSON. Fix the file to activate the usage display.",
@@ -106,7 +108,9 @@ const MESSAGES: Record<Lang, Record<string, (v: MsgVars) => string>> = {
 		modelUsage: () => "模型用量（近 24 小时）：",
 		toolUsage: () => "工具用量（近 24 小时）：",
 		detailUnavailable: () => "该供应商暂无明细端点。",
-		pressClose: () => "按 Enter 或 Esc 关闭",
+		pressClose: () => "按 Enter、Esc 或 Ctrl+C 关闭",
+		pressCloseShort: () => "Esc 关闭",
+		scrollStatus: (v) => `第 ${v.pos}/${v.total} 行 · ↑↓ 滚动 · Enter 关闭`,
 		alertCrossed: (v) => `GLM ${v.label} 配额已用 ${v.pct}%（越过 ${v.tier}%）`,
 		noKey: (v) => `pi-glm-usage：未找到 ${v.provider} 的 API key。请在 auth.json 添加 "${v.key}" 或设置 ${v.envVar}。`,
 		malformed: () => "pi-glm-usage：auth.json 不是有效 JSON，修复后即可显示用量。",
@@ -274,6 +278,260 @@ export function piAgentDir(env: Record<string, string | undefined>, homedir: str
 }
 
 // ---------------------------------------------------------------------------
+// Terminal text helpers — S3 pure: ANSI-aware width, wrapping, scroll windows.
+// ---------------------------------------------------------------------------
+
+/**
+ * Display width of a string, ANSI SGR sequences zero-width, CJK/emoji double.
+ * A pragmatic subset of East-Asian-width: enough for every line we render
+ * (currency rows, report text, JSON payload); surrogate pairs count as 2.
+ */
+export function visualWidth(s: string): number {
+	let w = 0;
+	for (let i = 0; i < s.length; ) {
+		const cp = s.codePointAt(i) ?? 0;
+		if (cp === 0x1b) {
+			i = skipEscape(s, i);
+			continue;
+		}
+		w += isWideChar(cp) ? 2 : 1;
+		i += cp > 0xffff ? 2 : 1;
+	}
+	return w;
+}
+
+/**
+ * Index just past an escape sequence starting at s[i] == ESC.
+ * Handles CSI (ESC [ ... final) and OSC (ESC ] ... BEL|ST) forms.
+ */
+function skipEscape(s: string, i: number): number {
+	if (s[i + 1] === "]") {
+		// OSC: runs until BEL (0x07) or ST (ESC \\), may contain any bytes.
+		let j = i + 2;
+		while (j < s.length) {
+			const b = s.charCodeAt(j);
+			if (b === 0x07) {
+				j += 1;
+				break;
+			}
+			if (b === 0x1b && s[j + 1] === "\\") {
+				j += 2;
+				break;
+			}
+			j += 1;
+		}
+		return j;
+	}
+	let j = i + 1;
+	while (j < s.length) {
+		const b = s.charCodeAt(j);
+		// '[' / ']' are CSI/OSC introducers, never finals.
+		if (b >= 0x40 && b <= 0x7e && b !== 0x5b && b !== 0x5d) {
+			j += 1;
+			break;
+		}
+		j += 1;
+	}
+	return j;
+}
+
+function isWideChar(cp: number): boolean {
+	return (
+		(cp >= 0x1100 && cp <= 0x115f) || // Hangul Jamo
+		(cp >= 0x2e80 && cp <= 0xa4cf) || // CJK radicals … Yi
+		(cp >= 0xac00 && cp <= 0xd7a3) || // Hangul syllables
+		(cp >= 0xf900 && cp <= 0xfaff) || // CJK compat ideographs
+		(cp >= 0xfe30 && cp <= 0xfe4f) || // CJK compat forms
+		(cp >= 0xff00 && cp <= 0xff60) || // Fullwidth forms
+		(cp >= 0xffe0 && cp <= 0xffe6) || // Fullwidth signs
+		(cp >= 0x1f300 && cp <= 0x1f64f) || // Emoji (pictographs)
+		(cp >= 0x1f900 && cp <= 0x1f9ff) || // Emoji (supplement)
+		(cp >= 0x20000 && cp <= 0x3fffd) // CJK ext B+ / ideographs
+	);
+}
+
+/**
+ * Wrap a line so no segment exceeds `width` visible columns. ANSI SGR codes
+ * are preserved and re-applied at the start of each segment (pi resets styles
+ * per line). Segments are cut at grapheme boundaries (surrogate pairs never
+ * split; a wide char is never split across segments). Inline escape sequences
+ * are carried through untouched.
+ */
+export function wrapLines(lines: string[], width: number): string[] {
+	if (width <= 0) return [...lines];
+	const out: string[] = [];
+	for (const line of lines) {
+		if (visualWidth(line) <= width) {
+			out.push(line);
+			continue;
+		}
+		// Tokenize so visible text and ANSI runs are handled separately: a
+		// segment never splits an escape sequence, and styles stay intact.
+		const tokens = ansiTokens(line);
+		const wrapped: string[] = [];
+		let cur = "";
+		let curW = 0;
+		for (const tok of tokens) {
+			if (tok.ansi) {
+				// Escape runs are zero-width and must stay with the segment.
+				cur += tok.s;
+				curW += 0;
+				continue;
+			}
+		const cw = isWideChar(tok.cp) ? 2 : 1;
+			if (curW + cw > width && visibleCharCount(cur) > 0) {
+				wrapped.push(cur);
+				// A single glyph wider than the whole line can never fit: drop it
+				// rather than emit an overflowing row (a 2-col char in a 1-col
+				// line would break the box frame).
+				cur = cw <= width ? tok.s : "";
+				curW = cw <= width ? cw : 0;
+			} else if (cw > width) {
+				// First char of a fresh segment can't fit either: drop silently.
+				cur = "";
+				curW = 0;
+			} else {
+				cur += tok.s;
+				curW += cw;
+			}
+		}
+		if (cur.length > 0) wrapped.push(cur);
+		// Re-apply the line's leading style to every segment after the first:
+		// the first already carries it (token flow), and pi resets styles per
+		// rendered line, so without this only the first row keeps the color.
+		// Strip ALL whitespace from the style prefix — a continuation segment
+		// must not inherit the original indentation.
+		const { ansiPrefix } = splitAnsi(line);
+		const styleOnly = ansiPrefix.replace(/\s/g, "");
+		for (let k = 0; k < wrapped.length; k++) {
+			out.push(k === 0 ? wrapped[k] : `${styleOnly}${wrapped[k]}`);
+		}
+	}
+	return out;
+}
+
+/** Visible (non-escape) character count of a segment. */
+function visibleCharCount(s: string): number {
+	let n = 0;
+	let i = 0;
+	while (i < s.length) {
+		if (s[i] === "\x1b") {
+			i = skipEscape(s, i);
+		} else {
+			const cp = s.codePointAt(i) ?? 0;
+			n += 1;
+			i += cp > 0xffff ? 2 : 1;
+		}
+	}
+	return n;
+}
+
+/** Pad a line to `width` visible columns with trailing spaces (ANSI-aware). */
+function padToWidth(line: string, width: number): string {
+	const cur = visualWidth(line);
+	return cur >= width ? line : `${line}${" ".repeat(width - cur)}`;
+}
+
+/**
+ * Chrome lines (header/status/footer) are status-bar-like: never wrap —
+ * truncate to the width by visible columns. Tokenizes so escape sequences
+ * stay atomic; leading spaces + style prefix survive intact.
+ */
+function clampChrome(line: string, width: number): string {
+	if (visualWidth(line) <= width) return line;
+	const tokens = ansiTokens(line);
+	let out = "";
+	let w = 0;
+	let sawVisible = false;
+	for (const tok of tokens) {
+		if (tok.ansi) {
+			out += tok.s;
+			continue;
+		}
+		const cw = isWideChar(tok.cp) ? 2 : 1;
+		if (!sawVisible && tok.s.trim() === "") {
+			// Leading whitespace is chrome formatting: keep up to width.
+			if (w + cw > width) break;
+			out += tok.s;
+			w += cw;
+			continue;
+		}
+		if (w + cw > width && w > 0) break;
+		out += tok.s;
+		w += cw;
+		sawVisible = true;
+	}
+	return out;
+}
+
+interface AnsiToken {
+	ansi: boolean;
+	s: string;
+	cp: number;
+}
+
+/** Split a line into [visible char | ANSI run] tokens, code-point aware. */
+function ansiTokens(line: string): AnsiToken[] {
+	const tokens: AnsiToken[] = [];
+	let i = 0;
+	while (i < line.length) {
+		if (line[i] === "\x1b") {
+			const j = skipEscape(line, i);
+			tokens.push({ ansi: true, s: line.slice(i, j), cp: 0 });
+			i = j;
+		} else {
+			const cp = line.codePointAt(i) ?? 0;
+			const ch = String.fromCodePoint(cp);
+			tokens.push({ ansi: false, s: ch, cp });
+			i += cp > 0xffff ? 2 : 1;
+		}
+	}
+	return tokens;
+}
+
+/** Strip leading and trailing ANSI SGR runs; return them separately. */
+function splitAnsi(line: string): { text: string; ansiPrefix: string; ansiSuffix: string } {
+	// Tokenize into [ansi | text] runs; prefix = leading spaces + leading ansi
+	// tokens, suffix = trailing ansi tokens, text = everything in between.
+	const tokens = ansiTokens(line);
+	let prefix = "";
+	let start = 0;
+	// Leading whitespace is formatting, not content — keep with the prefix.
+	while (start < tokens.length && (tokens[start].ansi || tokens[start].s.trim() === "")) {
+		prefix += tokens[start].s;
+		start += 1;
+	}
+	let suffix = "";
+	let end = tokens.length;
+	while (end > start && tokens[end - 1].ansi) {
+		suffix = tokens[end - 1].s + suffix;
+		end -= 1;
+	}
+	return { text: tokens.slice(start, end).map((t) => t.s).join(""), ansiPrefix: prefix, ansiSuffix: suffix };
+}
+
+/** Clamp scrollTop into [0, max(0, body.length - avail)]. */
+export function clampScrollTop(scrollTop: number, bodyLength: number, avail: number): number {
+	const max = Math.max(0, bodyLength - avail);
+	return Math.min(Math.max(0, scrollTop), max);
+}
+
+export interface WindowResult {
+	top: number;
+	lines: string[];
+	atEnd: boolean;
+}
+
+/** The visible window of a scrollable body, clamped, with end-of-content flag. */
+export function windowSlice(body: string[], scrollTop: number, avail: number): WindowResult {
+	const top = clampScrollTop(scrollTop, body.length, avail);
+	return {
+		top,
+		lines: body.slice(top, top + avail),
+		atEnd: top >= Math.max(0, body.length - avail),
+	};
+}
+
 // Footer rendering — S3 pure helpers.
 // ---------------------------------------------------------------------------
 
@@ -609,6 +867,189 @@ export function minExhaustionHours(runwayH: number, now: number, resetAt: number
 }
 
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Key matching — structural type for pi's injected KeybindingsManager.
+// ---------------------------------------------------------------------------
+
+export interface KeyLike {
+	matches(data: string, id: string): boolean;
+}
+
+// Overlay component — hand-rolled per zero-runtime-dep rule; types local.
+// ---------------------------------------------------------------------------
+
+export interface OverlayComponent {
+	render(width: number): string[];
+	invalidate(): void;
+	handleInput(data: string): void;
+}
+
+export interface OverlayComponentOpts {
+	header: string;
+	body: string[];
+	footer: string;
+	theme: FooterTheme;
+	kb: KeyLike;
+	done: (value: unknown) => void;
+	// Live row source — read at render time so terminal resizes are honored.
+	rowGen: () => number;
+	lang: Lang;
+}
+
+/**
+ * Fixed header + scrollable body + optional status line + fixed footer.
+ * Body is never truncated: it scrolls. `render` recomputes styled lines so
+ * `invalidate()` (called on theme change) really refreshes colors.
+ */
+export function createOverlayComponent(opts: OverlayComponentOpts): OverlayComponent {
+	const { header, body, footer, theme, kb, done, rowGen, lang } = opts;
+	let scrollTop = 0;
+	let closed = false;
+	// Last render width — scroll math must agree with the wrapping render used.
+	let lastWidth = 80;
+	// Drop a leading blank from the body: render already adds one after the
+	// header, so a body starting with "" would double up the spacing.
+	const body0 = body[0] === "" ? body.slice(1) : body;	
+
+	const close = () => {
+		if (closed) return;
+		closed = true;
+		done(undefined);
+	};
+
+	/**
+	 * Row budget read live (terminal resizes), matching pi's maxHeight
+	 * "80%" — the returned array must never exceed it or pi's head-keeping
+	 * clip would drop the bottom border after a shrink.
+	 */
+	function maxRowsAt(): number {
+		return Math.max(1, Math.floor(rowGen() * 0.8));
+	}
+
+	/**
+	 * Body availability for a given maxRows. The box always keeps: top
+	 * border(1) + blank(1) + footer row(1) + blank before footer(1) +
+	 * bottom border(1) = 5 chrome rows; with a status line: + status row +
+	 * its blank = 7. Body gets the rest; when maxRows can't fit a status
+	 * line it's dropped (content wins over chrome). When maxRows < 6 the
+	 * box cannot physically render (5-row minimum): degrade to borderless
+	 * plain rows so the overlay still closes the budget.
+	 */
+	function layout(width: number): { avail: number; canStatus: boolean; boxed: boolean } {
+		const maxRows = maxRowsAt();
+		// Box needs 2 columns for the side bars + a title that fits; below that
+		// (or tiny terminals) degrade to borderless plain rows.
+		const boxed = maxRows >= 6 && width >= 8;
+		// Boxed: borders(2) + title blank(1) + footer blank(1) + footer row(1) = 5.
+		// Borderless (tiny): header(1) + blank(1) + blank(1) + footer(1) = 4.
+		const chrome = boxed ? 5 : 4;
+		const avail = Math.max(0, maxRows - chrome);
+		const canStatus = boxed && maxRows >= chrome + 2 + 1;
+		return { avail, canStatus, boxed };
+	}
+
+	/**
+	 * Scroll window for the current body at the given inner width: how many
+	 * body rows fit (status line costing two rows) and whether status shows.
+	 * Shared by render and handleInput so the math never drifts.
+	 */
+	function scrollWindowAt(w: number): { bodyLines: string[]; avail: number; needsStatus: boolean } {
+		const innerW = Math.max(1, w - 2);
+		const bodyLines = wrapLines(body0, innerW);
+		const { avail, canStatus } = layout(w);
+		const needsStatus = canStatus && bodyLines.length > avail;
+		const bodyAvail = needsStatus ? Math.max(0, avail - 2) : avail;
+		return { bodyLines, avail: bodyAvail, needsStatus };
+	}
+
+	function renderLines(width: number): string[] {
+		const w = Math.max(1, width);
+		const innerW = Math.max(1, w - 2);
+		const { bodyLines, avail: bodyAvail, needsStatus } = scrollWindowAt(w);
+		const { boxed } = layout(w);
+		const win = windowSlice(bodyLines, scrollTop, bodyAvail);
+		scrollTop = win.top; // write back the clamp so input math agrees
+
+		const statusRow = needsStatus
+			? clampChrome(`  ${theme.fg("muted", msg(lang, "scrollStatus", { pos: win.atEnd ? bodyLines.length : win.top + win.lines.length, total: bodyLines.length }))}`, innerW)
+			: null;
+		const footerText = innerW < 20 ? msg(lang, "pressCloseShort") : footer;
+		const footerRow = clampChrome(`  ${theme.fg("dim", footerText)}`, innerW);
+		const titleRow = clampChrome(`  ${theme.fg("accent", header)}`, innerW);
+
+		const blocks: string[] = [""]; // blank under the top border
+		blocks.push(...win.lines);
+		if (statusRow) {
+			blocks.push("");
+			blocks.push(statusRow);
+		}
+		blocks.push("");
+		blocks.push(footerRow);
+
+		if (!boxed) {
+			// Degraded mode (maxRows < 6): borderless plain rows so the overlay
+			// still closes the height budget on absurdly short terminals.
+			const out: string[] = [titleRow];
+			if (win.lines.length > 0) out.push("", ...win.lines);
+			if (statusRow) out.push("", statusRow);
+			out.push("", footerRow);
+			return out;
+		}
+
+		// Top border: ╭─[centered title]─╮ (single corner char each side)
+		const titleStr = clampChrome(` ${theme.fg("accent", header)} `, innerW);
+		const titleW = visualWidth(titleStr);
+		const pad = Math.max(0, innerW - titleW);
+		const topPad = Math.floor(pad / 2);
+		const topPad2 = pad - topPad;
+		const top = theme.fg("border", "╭") + theme.fg("border", "─".repeat(topPad)) + titleStr + theme.fg("border", "─".repeat(topPad2)) + theme.fg("border", "╮");
+		const bottom = theme.fg("border", `╰${"─".repeat(Math.max(0, innerW))}╯`);
+
+		const out: string[] = [top];
+		for (const line of blocks) {
+			const inner = line === "" ? " ".repeat(innerW) : padToWidth(line, innerW);
+			out.push(`${theme.fg("border", "│")}${inner}${theme.fg("border", "│")}`);
+		}
+		out.push(bottom);
+		return out;
+	}
+
+	return {
+		render(width: number) {
+			lastWidth = Math.max(1, width);
+			return renderLines(lastWidth);
+		},
+		invalidate() {
+			// render() recomputes everything from theme each call; nothing cached.
+			// Kept as the pi contract entry point for theme changes.
+		},
+		handleInput(data: string) {
+			if (closed) return;
+			if (kb.matches(data, "tui.select.confirm") || kb.matches(data, "tui.select.cancel")) {
+				close();
+				return;
+			}
+			const w = Math.max(1, lastWidth);
+			const { bodyLines, avail: bodyAvail } = scrollWindowAt(w);
+			const max = Math.max(0, bodyLines.length - bodyAvail);
+			if (kb.matches(data, "tui.select.up")) {
+				scrollTop = clampScrollTop(scrollTop - 1, bodyLines.length, bodyAvail);
+			} else if (kb.matches(data, "tui.select.down")) {
+				scrollTop = clampScrollTop(scrollTop + 1, bodyLines.length, bodyAvail);
+			} else if (kb.matches(data, "tui.select.pageUp") || kb.matches(data, "tui.altScreen.pageUp")) {
+				scrollTop = clampScrollTop(scrollTop - Math.max(1, bodyAvail - 1), bodyLines.length, bodyAvail);
+			} else if (kb.matches(data, "tui.select.pageDown") || kb.matches(data, "tui.altScreen.pageDown")) {
+				scrollTop = clampScrollTop(scrollTop + Math.max(1, bodyAvail - 1), bodyLines.length, bodyAvail);
+			} else if (kb.matches(data, "tui.altScreen.top")) {
+				scrollTop = 0;
+			} else if (kb.matches(data, "tui.altScreen.bottom")) {
+				scrollTop = max;
+			}
+		},
+	};
+}
+
 // Threshold alerts — S3 pure evaluator + S1 wiring.
 // Dedup key: (provider, unit). Window identity: nextResetTime within
 // ±15min (live-verified stable within a window). A drop of ≥20 points
@@ -748,6 +1189,13 @@ export interface UiLike {
 	setStatus(key: string, text?: string): void;
 	notify(message: string, level?: string): void;
 	theme: FooterTheme;
+	// Same shape as the SDK's ExtensionUI.custom: the factory returns the
+	// component; done's result type is the generic T. We never use the
+	// resolved value, so the default unknown is fine.
+	custom?(
+		factory: (tui: unknown, theme: FooterTheme, kb: KeyLike, done: (value: unknown) => void) => OverlayComponent,
+		options?: { overlay?: boolean; overlayOptions?: { maxHeight?: number | `${number}%` } },
+	): Promise<unknown>;
 }
 
 export interface AlertStore {
@@ -972,20 +1420,20 @@ export function createExtension(deps: ExtensionDeps) {
 
 		async function showOverlay(text: string, ctx: { ui: UiLike & { custom(factory: unknown, opts?: unknown): Promise<unknown> } }): Promise<void> {
 			await ctx.ui.custom(
-				(_tui: unknown, theme: FooterTheme, _kb: unknown, done: (value: unknown) => void) => {
-					// Zero-dependency overlay: plain text lines joined per render.
-					// Enter (\r / \n) and Esc (\x1b) close; factory args provide
-					// the theme, so no runtime import from pi-tui is needed.
-					const lines = [`  ${theme.fg("accent", msg(lang, "reportTitle"))}`, "", ...text.split("\n"), "", `  ${theme.fg("dim", msg(lang, "pressClose"))}`];
-					return {
-						render: (width: number) => lines.map((l) => l.slice(0, Math.max(0, width))).join("\n"),
-						invalidate: () => {},
-						handleInput: (data: string) => {
-							if (data === "\r" || data === "\n" || data === "\x1b") done(undefined);
-						},
-					};
+				(tui: unknown, theme: FooterTheme, kb: KeyLike, done: (value: unknown) => void) => {
+					const rowGen = () => (tui as { terminal?: { rows?: number } }).terminal?.rows ?? 24;
+					return createOverlayComponent({
+						header: msg(lang, "reportTitle"),
+						body: text.split("\n"),
+						footer: msg(lang, "pressClose"),
+						theme,
+						kb,
+						done,
+						rowGen,
+						lang,
+					});
 				},
-				{ overlay: true },
+				{ overlay: true, overlayOptions: { maxHeight: "80%" } },
 			);
 		}
 
